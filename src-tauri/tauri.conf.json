@@ -12,9 +12,15 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "clip",
-        "width": 800,
-        "height": 600
+        "width": 640,
+        "height": 460,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "visible": false,
+        "center": true
       }
     ],
     "security": {
