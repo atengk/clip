@@ -88,30 +88,48 @@ impl SqliteStorage {
                 title TEXT NOT NULL,
                 content TEXT NOT NULL,
                 shortcut TEXT NOT NULL DEFAULT '',
+                pinyin_first TEXT NOT NULL DEFAULT '',
+                pinyin_full TEXT NOT NULL DEFAULT '',
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_snippets_updated ON snippets(updated_at DESC, id DESC);
             CREATE INDEX IF NOT EXISTS idx_snippets_shortcut ON snippets(shortcut);
+            CREATE INDEX IF NOT EXISTS idx_snippets_pinyin ON snippets(pinyin_first);
+
+            -- 4. 应用元数据配置表 (杜绝用户清空数据后种子模板被意外重新播种)
+            CREATE TABLE IF NOT EXISTS app_metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
             "#,
         )
         .map_err(|e| StorageError::DatabaseError(format!("初始化数据表与 FTS5 触发器失败: {e}")))?;
 
-        // 初始化内置开箱即用示例短语模板
-        let snippet_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM snippets", [], |r| r.get(0))
-            .unwrap_or(0);
-        if snippet_count == 0 {
+        // 初始化内置开箱即用示例短语模板 (仅在首次初始化时播种一次，用户主动清空后绝不复活)
+        let is_seeded: bool = conn
+            .query_row(
+                "SELECT 1 FROM app_metadata WHERE key = 'snippets_seeded'",
+                [],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+
+        if !is_seeded {
             let now_ms = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis() as i64;
             let _ = conn.execute(
-                "INSERT INTO snippets (title, content, shortcut, created_at, updated_at) VALUES
-                 ('今日站会汇报', '【{current_date} 站会汇报】\n1. 昨日进展：\n2. 今日计划：\n3. 阻塞风险：无', 'meet', ?1, ?1),
-                 ('当前时间戳', '{datetime}', 'time', ?1, ?1),
-                 ('剪贴板引用回复', '> {clipboard}\n\n已收到并处理。', 'quote', ?1, ?1)",
+                "INSERT INTO snippets (title, content, shortcut, pinyin_first, pinyin_full, created_at, updated_at) VALUES
+                 ('今日站会汇报', '【{current_date} 站会汇报】\n1. 昨日进展：\n2. 今日计划：\n3. 阻塞风险：无', 'meet', 'jrzhhb', 'jinrizhanhuihuibao', ?1, ?1),
+                 ('当前时间戳', '{datetime}', 'time', 'dqsjc', 'dangqianshijianchuo', ?1, ?1),
+                 ('剪贴板引用回复', '> {clipboard}\n\n已收到并处理。', 'quote', 'jtbyyhf', 'jiantiebanyinyonghuifu', ?1, ?1)",
                 params![now_ms],
+            );
+            let _ = conn.execute(
+                "INSERT OR REPLACE INTO app_metadata (key, value) VALUES ('snippets_seeded', 'true')",
+                [],
             );
         }
 
@@ -397,13 +415,15 @@ impl Storage for SqliteStorage {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as i64;
+        let clean_shortcut = shortcut.trim().trim_start_matches('/');
+        let (py_first, py_full) = extract_snippet_pinyin(title);
         let conn = self.conn.lock().unwrap();
 
         if let Some(target_id) = id {
             let rows_affected = conn
                 .execute(
-                    "UPDATE snippets SET title = ?1, content = ?2, shortcut = ?3, updated_at = ?4 WHERE id = ?5",
-                    params![title, content, shortcut, now_ms, target_id],
+                    "UPDATE snippets SET title = ?1, content = ?2, shortcut = ?3, pinyin_first = ?4, pinyin_full = ?5, updated_at = ?6 WHERE id = ?7",
+                    params![title, content, clean_shortcut, py_first, py_full, now_ms, target_id],
                 )
                 .map_err(|e| StorageError::DatabaseError(format!("更新常用短语失败: {e}")))?;
 
@@ -423,14 +443,14 @@ impl Storage for SqliteStorage {
                 id: target_id,
                 title: title.to_string(),
                 content: content.to_string(),
-                shortcut: shortcut.to_string(),
+                shortcut: clean_shortcut.to_string(),
                 created_at,
                 updated_at: now_ms,
             })
         } else {
             conn.execute(
-                "INSERT INTO snippets (title, content, shortcut, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![title, content, shortcut, now_ms, now_ms],
+                "INSERT INTO snippets (title, content, shortcut, pinyin_first, pinyin_full, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![title, content, clean_shortcut, py_first, py_full, now_ms, now_ms],
             )
             .map_err(|e| StorageError::DatabaseError(format!("新建常用短语失败: {e}")))?;
 
@@ -439,7 +459,7 @@ impl Storage for SqliteStorage {
                 id: new_id,
                 title: title.to_string(),
                 content: content.to_string(),
-                shortcut: shortcut.to_string(),
+                shortcut: clean_shortcut.to_string(),
                 created_at: now_ms,
                 updated_at: now_ms,
             })
@@ -500,7 +520,7 @@ impl Storage for SqliteStorage {
             let mut stmt = conn
                 .prepare(
                     "SELECT id, title, content, shortcut, created_at, updated_at FROM snippets
-                     WHERE shortcut LIKE ?1 OR title LIKE ?1
+                     WHERE shortcut LIKE ?1 OR title LIKE ?1 OR pinyin_first LIKE ?1
                      ORDER BY CASE
                          WHEN shortcut = ?2 THEN 0
                          WHEN shortcut LIKE (?2 || '%') THEN 1
@@ -520,7 +540,7 @@ impl Storage for SqliteStorage {
             let mut stmt = conn
                 .prepare(
                     "SELECT id, title, content, shortcut, created_at, updated_at FROM snippets
-                     WHERE title LIKE ?1 OR shortcut LIKE ?1 OR content LIKE ?1
+                     WHERE title LIKE ?1 OR shortcut LIKE ?1 OR content LIKE ?1 OR pinyin_first LIKE ?1 OR pinyin_full LIKE ?1
                      ORDER BY updated_at DESC, id DESC",
                 )
                 .map_err(|e| StorageError::DatabaseError(format!("准备搜索短语失败: {e}")))?;
@@ -533,6 +553,29 @@ impl Storage for SqliteStorage {
             Ok(list)
         }
     }
+}
+
+/// 提取文本的简拼与全拼基础索引 (小写)
+fn extract_snippet_pinyin(text: &str) -> (String, String) {
+    use pinyin::ToPinyinMulti;
+    let mut initials = String::new();
+    let mut fulls = String::new();
+    for ch in text.chars() {
+        if let Some(multi) = ch.to_pinyin_multi() {
+            if let Some(p) = multi.into_iter().next() {
+                let plain = p.plain();
+                if let Some(first) = plain.chars().next() {
+                    initials.push(first.to_ascii_lowercase());
+                }
+                fulls.push_str(&plain.to_ascii_lowercase());
+                continue;
+            }
+        }
+        let lower = ch.to_ascii_lowercase();
+        initials.push(lower);
+        fulls.push(lower);
+    }
+    (initials, fulls)
 }
 
 /// 解析 SQLite 数据行为剪贴板实体对象
@@ -718,13 +761,13 @@ mod tests {
         let initial = storage.get_all_snippets().unwrap();
         assert_eq!(initial.len(), 3);
 
-        // 新建自定义短语
+        // 新建自定义短语 (带前缀斜杠输入测试)
         let created = storage
-            .save_snippet(None, "请假申请", "主管您好，因个人事务申请请假一日。", "leave")
+            .save_snippet(None, "请假申请", "主管您好，因个人事务申请请假一日。", "/leave")
             .unwrap();
         assert!(created.id > 0);
         assert_eq!(created.title, "请假申请");
-        assert_eq!(created.shortcut, "leave");
+        assert_eq!(created.shortcut, "leave", "快捷缩写的前缀斜杠必须被清洗剔除");
 
         // 编辑更新短语
         let updated = storage
@@ -745,21 +788,36 @@ mod tests {
         assert!(deleted);
         let by_id = storage.get_snippet_by_id(created.id).unwrap();
         assert!(by_id.is_none());
+
+        // 验证即使全部删除后再次调用 init_tables 也绝不复活种子模板
+        let all_current = storage.get_all_snippets().unwrap();
+        for item in all_current {
+            storage.delete_snippet(item.id).unwrap();
+        }
+        assert_eq!(storage.get_all_snippets().unwrap().len(), 0);
+        storage.init_tables().unwrap();
+        assert_eq!(storage.get_all_snippets().unwrap().len(), 0, "用户主动清空短语库后种子模板绝不复活");
     }
 
     #[test]
     fn test_sqlite_snippets_search() {
         let storage = SqliteStorage::new_in_memory().unwrap();
-        // 测试 / 前缀检索快捷命令
+        // 1. 测试 / 前缀检索快捷命令
         let res_meet = storage.search_snippets("/meet").unwrap();
         assert_eq!(res_meet.len(), 1);
         assert_eq!(res_meet[0].shortcut, "meet");
         assert_eq!(res_meet[0].title, "今日站会汇报");
 
-        // 测试直接按名称检索
+        // 2. 测试直接按名称检索
         let res_time = storage.search_snippets("时间戳").unwrap();
         assert_eq!(res_time.len(), 1);
         assert_eq!(res_time[0].shortcut, "time");
+
+        // 3. 测试中文拼音首字母简拼检索 (AC-3 拼音匹配短语)
+        let res_pinyin = storage.search_snippets("jrzh").unwrap();
+        assert_eq!(res_pinyin.len(), 1);
+        assert_eq!(res_pinyin[0].title, "今日站会汇报");
     }
 }
+
 

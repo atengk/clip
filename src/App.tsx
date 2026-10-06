@@ -431,7 +431,7 @@ export const App: React.FC = () => {
         id: editingSnippet ? editingSnippet.id : null,
         title: snippetTitle.trim(),
         content: snippetContent,
-        shortcut: snippetShortcut.trim(),
+        shortcut: snippetShortcut.trim().replace(/^\/+/, ""),
       });
       setSnippetModalOpen(false);
       loadData(activeTab, query);
