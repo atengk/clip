@@ -53,6 +53,26 @@ export interface QueueStatus {
 }
 
 /**
+ * 隐身无痕模式状态快照 (工单 #10)
+ */
+export interface IncognitoStatus {
+  is_active: boolean;
+  expires_at?: number | null;
+  remaining_seconds?: number | null;
+}
+
+/**
+ * 灾备归档元数据清单 (工单 #10)
+ */
+export interface BackupManifest {
+  version: string;
+  created_at: number;
+  entry_count: number;
+  snippet_count: number;
+  blob_count: number;
+}
+
+/**
  * 顶部激活 Tab 模式
  */
 export type ActiveTab = "history" | "snippets";
@@ -168,6 +188,20 @@ export const App: React.FC = () => {
   const [snippetShortcut, setSnippetShortcut] = useState<string>("");
   const [snippetContent, setSnippetContent] = useState<string>("");
   const [snippetFormError, setSnippetFormError] = useState<string | null>(null);
+
+  // 隐身模式状态 (工单 #10 AC-1)
+  const [incognitoStatus, setIncognitoStatus] = useState<IncognitoStatus>({
+    is_active: false,
+    expires_at: null,
+    remaining_seconds: null,
+  });
+
+  // 系统设置与灾备归档模态框 (工单 #10 AC-2 ~ AC-4)
+  const [settingsModalOpen, setSettingsModalOpen] = useState<boolean>(false);
+  const [autostartEnabled, setAutostartEnabled] = useState<boolean>(false);
+  const [backupPath, setBackupPath] = useState<string>("clip_backup.clipbak");
+  const [backupMsg, setBackupMsg] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const [backupLoading, setBackupLoading] = useState<boolean>(false);
 
   const inputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -364,6 +398,101 @@ export const App: React.FC = () => {
       console.error("连贴出队回填失败:", err);
     }
   }, []);
+
+  /**
+   * 切换隐身模式 (工单 #10 AC-1)
+   */
+  const handleToggleIncognito = useCallback(async (durationMinutes?: number) => {
+    try {
+      const status = await invoke<IncognitoStatus>("toggle_incognito", {
+        durationMinutes: durationMinutes ?? null,
+      });
+      setIncognitoStatus(status);
+    } catch (err) {
+      console.error("切换隐身模式失败:", err);
+    }
+  }, []);
+
+  /**
+   * 切换开机自启动配置 (工单 #10 AC-2)
+   */
+  const handleToggleAutostart = useCallback(async () => {
+    try {
+      const res = await invoke<boolean>("set_autostart", { enable: !autostartEnabled });
+      setAutostartEnabled(res);
+    } catch (err) {
+      console.error("设置开机自启失败:", err);
+    }
+  }, [autostartEnabled]);
+
+  /**
+   * 导出 .clipbak 灾备归档 (工单 #10 AC-3)
+   */
+  const handleExportBackup = useCallback(async () => {
+    if (!backupPath.trim()) return;
+    setBackupLoading(true);
+    setBackupMsg(null);
+    try {
+      const manifest = await invoke<BackupManifest>("export_backup", { path: backupPath.trim() });
+      setBackupMsg({
+        type: "success",
+        text: `备份成功！包含 ${manifest.entry_count} 条历史，${manifest.snippet_count} 条短语，${manifest.blob_count} 个图片。`,
+      });
+    } catch (err) {
+      setBackupMsg({
+        type: "error",
+        text: `导出失败: ${err}`,
+      });
+    } finally {
+      setBackupLoading(false);
+    }
+  }, [backupPath]);
+
+  /**
+   * 从 .clipbak 还原数据 (工单 #10 AC-4)
+   */
+  const handleImportBackup = useCallback(async () => {
+    if (!backupPath.trim()) return;
+    setBackupLoading(true);
+    setBackupMsg(null);
+    try {
+      const manifest = await invoke<BackupManifest>("import_backup", { path: backupPath.trim() });
+      setBackupMsg({
+        type: "success",
+        text: `恢复成功！已还原 ${manifest.entry_count} 条历史与 ${manifest.snippet_count} 条短语。`,
+      });
+      loadData(activeTab, query);
+    } catch (err) {
+      setBackupMsg({
+        type: "error",
+        text: `导入还原失败: ${err}`,
+      });
+    } finally {
+      setBackupLoading(false);
+    }
+  }, [backupPath, loadData, activeTab, query]);
+
+  /**
+   * 清空全部剪贴板历史记录
+   */
+  const handleClearAllHistory = useCallback(async () => {
+    if (!window.confirm("确定要清空全部剪贴板历史记录和图片缓存吗？（常用短语不会被删除）")) {
+      return;
+    }
+    try {
+      await invoke("clear_all_history");
+      loadData(activeTab, query);
+      setBackupMsg({
+        type: "success",
+        text: "已成功清空全部剪贴板历史记录。",
+      });
+    } catch (err) {
+      setBackupMsg({
+        type: "error",
+        text: `清空失败: ${err}`,
+      });
+    }
+  }, [loadData, activeTab, query]);
 
   /**
    * 触发自定义文本（如 OCR 提取文本）的极速回填
@@ -585,6 +714,14 @@ export const App: React.FC = () => {
       .then(setQueueStatus)
       .catch((err) => console.error("获取连贴状态失败:", err));
 
+    // 获取初始隐身状态与自启配置 (工单 #10)
+    invoke<IncognitoStatus>("get_incognito_status")
+      .then(setIncognitoStatus)
+      .catch((err) => console.error("获取隐身状态失败:", err));
+    invoke<boolean>("is_autostart_enabled")
+      .then(setAutostartEnabled)
+      .catch((err) => console.error("获取自启配置失败:", err));
+
     // 2. 监听系统剪贴板更新事件
     const unlistenClipboard = listen<ClipboardEntry>("clipboard-changed", () => {
       loadData(activeTab, query);
@@ -593,6 +730,16 @@ export const App: React.FC = () => {
     // 3. 监听队列连贴状态变更广播 (AC-1 ~ AC-3)
     const unlistenQueue = listen<QueueStatus>("paste-queue-changed", (event) => {
       setQueueStatus(event.payload);
+    });
+
+    // 监听隐身状态变更广播 (工单 #10 AC-1)
+    const unlistenIncognito = listen<IncognitoStatus>("incognito-changed", (event) => {
+      setIncognitoStatus(event.payload);
+    });
+
+    // 监听外部数据恢复或清空广播 (工单 #10 AC-4)
+    const unlistenRestored = listen("data-restored", () => {
+      loadData(activeTab, query);
     });
 
     // 4. 监听窗口唤起展示事件 (初始化焦点与清空历史)
@@ -605,6 +752,7 @@ export const App: React.FC = () => {
       setActionPaletteOpen(false);
       setPreviewModalOpen(false);
       setSnippetModalOpen(false);
+      setSettingsModalOpen(false);
       setTimeout(() => {
         inputRef.current?.focus();
         inputRef.current?.select();
@@ -620,6 +768,8 @@ export const App: React.FC = () => {
     return () => {
       unlistenClipboard.then((f) => f());
       unlistenQueue.then((f) => f());
+      unlistenIncognito.then((f) => f());
+      unlistenRestored.then((f) => f());
       unlistenPanelShown.then((f) => f());
       window.removeEventListener("blur", handleBlur);
     };
@@ -631,6 +781,16 @@ export const App: React.FC = () => {
     const handleKeyDown = (e: KeyboardEvent) => {
       // 1. 输入法合成状态保护：正在输入中文拼音时，Enter 仅用于确认上屏，绝不触发粘贴
       if (e.isComposing) {
+        return;
+      }
+
+      // 设置与灾备归档模态框处于开启态时的键盘路由
+      if (settingsModalOpen) {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          setSettingsModalOpen(false);
+          return;
+        }
         return;
       }
 
@@ -880,6 +1040,7 @@ export const App: React.FC = () => {
     handleOpenCreateSnippet,
     handleTabChange,
     executeAction,
+    settingsModalOpen,
   ]);
 
   const isHudView = typeof window !== "undefined" && window.location.search.includes("view=hud");
@@ -954,8 +1115,45 @@ export const App: React.FC = () => {
                 + 新建短语
               </button>
             )}
+            <button
+              className={`incognito-toggle-btn ${incognitoStatus.is_active ? "active" : ""}`}
+              onClick={() => handleToggleIncognito()}
+              title="切换隐身模式 (AC-1)"
+            >
+              🕵️ {incognitoStatus.is_active ? "隐身中" : "隐身"}
+            </button>
+            <button
+              className="settings-toggle-btn"
+              onClick={() => {
+                setSettingsModalOpen(true);
+                setBackupMsg(null);
+              }}
+              title="系统设置与灾备管理 (AC-2, AC-3, AC-4)"
+            >
+              ⚙️ 设置
+            </button>
           </div>
         </div>
+
+        {incognitoStatus.is_active && (
+          <div className="incognito-banner">
+            <div className="incognito-banner-info">
+              <span className="incognito-banner-icon">🕵️</span>
+              <span className="incognito-banner-text">
+                隐身模式进行中：已暂停记录剪贴板内容
+                {incognitoStatus.remaining_seconds
+                  ? ` (剩余约 ${Math.ceil(incognitoStatus.remaining_seconds / 60)} 分钟)`
+                  : ""}
+              </span>
+            </div>
+            <button
+              className="incognito-banner-btn"
+              onClick={() => handleToggleIncognito()}
+            >
+              退出隐身
+            </button>
+          </div>
+        )}
 
         <div className="search-bar">
           <span className="search-icon">🔍</span>
@@ -1537,6 +1735,95 @@ export const App: React.FC = () => {
               <button className="btn-primary" onClick={handleSaveSnippet}>
                 保存短语
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 系统设置与灾备管理模态框 (工单 #10 AC-2, AC-3, AC-4) */}
+      {settingsModalOpen && (
+        <div className="settings-overlay" onClick={() => setSettingsModalOpen(false)}>
+          <div className="settings-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="settings-header">
+              <div className="settings-title">
+                <span>⚙️</span>
+                <span>系统设置与灾备管理</span>
+              </div>
+              <button className="settings-close-btn" onClick={() => setSettingsModalOpen(false)}>
+                ✕
+              </button>
+            </div>
+            <div className="settings-body">
+              {/* 开机静默自启 */}
+              <div className="settings-section">
+                <div className="settings-section-title">🚀 系统守护</div>
+                <div className="settings-row">
+                  <div className="settings-label-group">
+                    <span className="settings-label">开机静默后台自启</span>
+                    <span className="settings-desc">随系统开机在后台静默运行（进入托盘不弹窗）</span>
+                  </div>
+                  <label className="settings-switch-label">
+                    <input
+                      type="checkbox"
+                      checked={autostartEnabled}
+                      onChange={handleToggleAutostart}
+                    />
+                    <span className="settings-slider" />
+                  </label>
+                </div>
+              </div>
+
+              {/* 灾备归档 (.clipbak) */}
+              <div className="settings-section">
+                <div className="settings-section-title">📦 灾备归档 (.clipbak)</div>
+                <span className="settings-desc">
+                  完整导出或还原 SQLite 结构化数据与图片 Blobs 文件
+                </span>
+                <div className="backup-input-group">
+                  <input
+                    type="text"
+                    className="backup-input"
+                    value={backupPath}
+                    onChange={(e) => setBackupPath(e.target.value)}
+                    placeholder="备份文件路径 (如 clip_backup.clipbak)"
+                  />
+                </div>
+                <div className="backup-btn-group">
+                  <button
+                    className="backup-action-btn export"
+                    disabled={backupLoading}
+                    onClick={handleExportBackup}
+                  >
+                    {backupLoading ? "处理中..." : "📤 一键导出备份"}
+                  </button>
+                  <button
+                    className="backup-action-btn import"
+                    disabled={backupLoading}
+                    onClick={handleImportBackup}
+                  >
+                    {backupLoading ? "处理中..." : "📥 导入备份还原"}
+                  </button>
+                </div>
+                {backupMsg && (
+                  <div className={`backup-feedback ${backupMsg.type}`}>
+                    {backupMsg.text}
+                  </div>
+                )}
+              </div>
+
+              {/* 清理维护 */}
+              <div className="settings-section">
+                <div className="settings-section-title">🧹 清理维护</div>
+                <div className="settings-row">
+                  <div className="settings-label-group">
+                    <span className="settings-label">清空剪贴板历史</span>
+                    <span className="settings-desc">清除所有已捕获历史与图片缓存（常用短语将保留）</span>
+                  </div>
+                  <button className="danger-clear-btn" onClick={handleClearAllHistory}>
+                    清空历史
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
         </div>

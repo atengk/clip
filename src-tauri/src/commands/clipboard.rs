@@ -4,9 +4,12 @@
 //! @since 2026-10-06
 
 use crate::commands::AppState;
+use crate::engine::backup::BackupManifest;
+use crate::engine::incognito::IncognitoStatus;
 use crate::engine::queue::{QueueItem, QueueStatus};
 use crate::engine::transform::TransformAction;
 use crate::storage::{ClipboardEntry, Snippet};
+use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -383,5 +386,136 @@ pub fn paste_multiple_entries(
         .engine
         .paste_multiple_entries(&ids, sep)
         .map_err(|e| format!("执行多选合并回填失败: {e}"))
+}
+
+/// 切换隐身模式 (AC-1)
+///
+/// @param app Tauri 应用程序句柄
+/// @param state 全局应用共享状态
+/// @param duration_minutes 隐身持续分钟数（None 表示手动退出，Some(15) 或 Some(60) 表示定时）
+/// @return 切换后的最新隐身状态快照
+#[tauri::command]
+pub fn toggle_incognito(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    duration_minutes: Option<u64>,
+) -> Result<IncognitoStatus, String> {
+    let _ = state.engine.toggle_incognito(duration_minutes);
+    let status = state.engine.get_incognito_status();
+    let _ = app.emit("incognito-changed", &status);
+    crate::sync_tray_icon_and_menu(&app, &state.engine);
+
+    if let Some(mins) = duration_minutes {
+        let app_clone = app.clone();
+        let engine_clone = state.engine.clone();
+        let delay_secs = mins * 60;
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(delay_secs + 1));
+            if !engine_clone.is_incognito_active() {
+                let current_status = engine_clone.get_incognito_status();
+                let _ = app_clone.emit("incognito-changed", &current_status);
+                crate::sync_tray_icon_and_menu(&app_clone, &engine_clone);
+            }
+        });
+    }
+
+    Ok(status)
+}
+
+/// 查询隐身模式状态快照 (AC-1)
+///
+/// @param state 全局应用共享状态
+/// @return 当前隐身状态对象
+#[tauri::command]
+pub fn get_incognito_status(
+    state: State<'_, AppState>,
+) -> Result<IncognitoStatus, String> {
+    Ok(state.engine.get_incognito_status())
+}
+
+/// 导出完整剪贴板数据及图片至 .clipbak 灾备压缩归档包 (AC-3)
+///
+/// @param state 全局应用共享状态
+/// @param path 目标归档压缩包文件路径
+/// @return 导出的元数据清单
+#[tauri::command]
+pub fn export_backup(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<BackupManifest, String> {
+    let p = PathBuf::from(path);
+    state
+        .engine
+        .export_backup(&p)
+        .map_err(|e| format!("导出备份失败: {e}"))
+}
+
+/// 从 .clipbak 灾备压缩归档包中解包并完整还原数据 (AC-4)
+///
+/// @param app Tauri 应用程序句柄
+/// @param state 全局应用共享状态
+/// @param path 待导入归档压缩包文件路径
+/// @return 还原的元数据清单
+#[tauri::command]
+pub fn import_backup(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<BackupManifest, String> {
+    let p = PathBuf::from(path);
+    let manifest = state
+        .engine
+        .import_backup(&p)
+        .map_err(|e| format!("导入备份失败: {e}"))?;
+    let _ = app.emit("data-restored", ());
+    Ok(manifest)
+}
+
+/// 查询系统开机自启配置状态 (AC-2)
+///
+/// @param state 全局应用共享状态
+/// @return 当前开机自启是否已启用
+#[tauri::command]
+pub fn is_autostart_enabled(
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    Ok(state.engine.is_autostart_enabled())
+}
+
+/// 设置系统开机静默自启状态 (AC-2)
+///
+/// @param app Tauri 应用程序句柄
+/// @param state 全局应用共享状态
+/// @param enable 是否开启开机自启
+/// @return 最新开机自启状态
+#[tauri::command]
+pub fn set_autostart(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    enable: bool,
+) -> Result<bool, String> {
+    state
+        .engine
+        .set_autostart(enable)
+        .map_err(|e| format!("设置自启动失败: {e}"))?;
+    crate::sync_tray_icon_and_menu(&app, &state.engine);
+    Ok(state.engine.is_autostart_enabled())
+}
+
+/// 清空所有剪贴板历史记录与图片 Blob
+///
+/// @param app Tauri 应用程序句柄
+/// @param state 全局应用共享状态
+#[tauri::command]
+pub fn clear_all_history(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state
+        .engine
+        .clear_history()
+        .map_err(|e| format!("清空剪贴板历史失败: {e}"))?;
+    let _ = app.emit("data-restored", ());
+    Ok(())
 }
 

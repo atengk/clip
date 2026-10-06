@@ -5,13 +5,19 @@
 //! @author Ateng
 //! @since 2026-10-06
 
+pub mod autostart;
+pub mod backup;
 pub mod hash;
+pub mod incognito;
 pub mod pinyin;
 pub mod privacy;
 pub mod queue;
 pub mod snippet;
 pub mod transform;
 
+use crate::engine::autostart::AutostartManager;
+use crate::engine::backup::{BackupArchive, BackupError, BackupManifest};
+use crate::engine::incognito::{IncognitoManager, IncognitoStatus};
 use crate::engine::pinyin::PinyinMatcher;
 use crate::engine::privacy::PrivacyFilter;
 use crate::engine::queue::{PasteQueueManager, QueueItem, QueueStatus};
@@ -19,7 +25,7 @@ use crate::engine::snippet::{SnippetContext, SnippetEngine};
 use crate::engine::transform::{TextTransformer, TransformAction};
 use crate::pal::{PalError, PlatformDriver};
 use crate::storage::{ClipboardEntry, Snippet, Storage, StorageError};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use thiserror::Error;
@@ -49,6 +55,8 @@ pub enum EngineError {
     EntryNotFound(i64),
     #[error("格式转换失败: {0}")]
     Transform(String),
+    #[error("灾备归档异常: {0}")]
+    Backup(#[from] BackupError),
 }
 
 /// 图片元数据与 Base64 视图模型
@@ -71,6 +79,7 @@ pub struct ClipboardEngine {
     privacy_filter: PrivacyFilter,
     blob_dir: PathBuf,
     queue_manager: Arc<PasteQueueManager>,
+    incognito_manager: Arc<IncognitoManager>,
 }
 
 impl ClipboardEngine {
@@ -91,6 +100,7 @@ impl ClipboardEngine {
             privacy_filter: PrivacyFilter::new(),
             blob_dir: default_blob_dir,
             queue_manager: Arc::new(PasteQueueManager::new()),
+            incognito_manager: Arc::new(IncognitoManager::new()),
         }
     }
 
@@ -155,6 +165,11 @@ impl ClipboardEngine {
     ///
     /// @return 捕获或跃升的剪贴板实体；若被拦截或抑制则返回 Ok(None)
     pub fn handle_clipboard_change(&self) -> Result<Option<ClipboardEntry>, EngineError> {
+        // 0. 隐身无痕模式拦截 (Incognito Mode - AC-1)
+        if self.incognito_manager.is_active() {
+            return Ok(None);
+        }
+
         // 1. 协议级标记与进程黑名单隐私拦截 (Privacy Filter)
         let is_ignored = self.driver.is_clipboard_ignored()?;
         let source_process = self.driver.get_clipboard_source_process()?;
@@ -606,6 +621,76 @@ impl ClipboardEngine {
         }
         Ok(merged)
     }
+
+    /// 开启隐身无痕模式 (AC-1)
+    ///
+    /// @param duration_minutes 可选持续分钟数（None 表示手动退出）
+    pub fn enter_incognito(&self, duration_minutes: Option<u64>) {
+        self.incognito_manager.enter(duration_minutes);
+    }
+
+    /// 退出隐身无痕模式
+    pub fn leave_incognito(&self) {
+        self.incognito_manager.leave();
+    }
+
+    /// 切换隐身无痕模式
+    ///
+    /// @param duration_minutes 开启时指定的持续分钟数
+    /// @return 切换后的最新状态
+    pub fn toggle_incognito(&self, duration_minutes: Option<u64>) -> bool {
+        self.incognito_manager.toggle(duration_minutes)
+    }
+
+    /// 获取隐身模式当前状态快照
+    pub fn get_incognito_status(&self) -> IncognitoStatus {
+        self.incognito_manager.get_status()
+    }
+
+    /// 查询当前是否处于隐身模式
+    pub fn is_incognito_active(&self) -> bool {
+        self.incognito_manager.is_active()
+    }
+
+    /// 导出数据至自包含 .clipbak 灾备压缩包 (AC-3)
+    ///
+    /// @param target_path 目标导出路径
+    /// @return 备份包元数据清单
+    pub fn export_backup(&self, target_path: &Path) -> Result<BackupManifest, EngineError> {
+        let manifest = BackupArchive::export_archive(&*self.storage, &self.blob_dir, target_path)?;
+        Ok(manifest)
+    }
+
+    /// 从 .clipbak 压缩包解包导入并完整恢复数据 (AC-4)
+    ///
+    /// @param source_path 待导入的备份文件路径
+    /// @return 还原的备份包元数据清单
+    pub fn import_backup(&self, source_path: &Path) -> Result<BackupManifest, EngineError> {
+        let manifest = BackupArchive::import_archive(&*self.storage, &self.blob_dir, source_path)?;
+        Ok(manifest)
+    }
+
+    /// 清空所有剪贴板历史记录与图片 Blob 文件（托盘菜单维护项）
+    pub fn clear_history(&self) -> Result<(), EngineError> {
+        self.storage.prune_lru(0)?;
+        let _ = self.prune_orphan_blobs();
+        let mut last_guard = self.last_captured_text.lock().unwrap();
+        *last_guard = None;
+        Ok(())
+    }
+
+    /// 查询当前系统开机自启配置状态 (AC-2)
+    pub fn is_autostart_enabled(&self) -> bool {
+        AutostartManager::is_enabled()
+    }
+
+    /// 设置开机静默后台自启动状态 (AC-2)
+    ///
+    /// @param enable 是否开启开机自启
+    pub fn set_autostart(&self, enable: bool) -> Result<(), EngineError> {
+        AutostartManager::set_enabled(enable)
+            .map_err(|e| EngineError::Platform(PalError::InternalError(e)))
+    }
 }
 
 #[cfg(test)]
@@ -1048,5 +1133,83 @@ mod tests {
         assert_eq!(merged_comma, "Line Three, Line One");
         assert_eq!(driver.read_text().unwrap().unwrap(), "Line Three, Line One");
         assert_eq!(driver.paste_count(), 2);
+    }
+
+    #[test]
+    fn test_engine_incognito_mode_bypass() {
+        let (driver, engine) = setup_engine();
+
+        // 1. 常规模式正常捕获入库
+        driver.simulate_clipboard_change(Some("Normal Text".into()));
+        let normal_entry = engine.handle_clipboard_change().unwrap();
+        assert!(normal_entry.is_some());
+        assert_eq!(engine.get_entries(10).unwrap().len(), 1);
+
+        // 2. 激活隐身模式 (AC-1)
+        engine.enter_incognito(None);
+        assert!(engine.is_incognito_active());
+        assert!(engine.get_incognito_status().is_active);
+
+        // 3. 隐身期间复制内容，事件被直接旁路拦截丢弃，数据库无任何记录
+        driver.simulate_clipboard_change(Some("Secret Password 123456".into()));
+        let bypassed = engine.handle_clipboard_change().unwrap();
+        assert!(bypassed.is_none(), "隐身模式下事件必须被旁路丢弃");
+
+        // 验证数据库条目数依然为 1，无任何脏数据落盘
+        let entries = engine.get_entries(10).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].content, "Normal Text");
+
+        // 4. 退出隐身模式，恢复捕获
+        engine.leave_incognito();
+        assert!(!engine.is_incognito_active());
+
+        driver.simulate_clipboard_change(Some("Resume Normal Text".into()));
+        let resumed = engine.handle_clipboard_change().unwrap();
+        assert!(resumed.is_some());
+        assert_eq!(engine.get_entries(10).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_engine_backup_and_restore_workflow() {
+        let (driver, engine) = setup_engine();
+        let temp_dir = std::env::temp_dir().join(format!(
+            "clip_engine_backup_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::create_dir_all(&temp_dir);
+
+        // 1. 生成测试数据
+        driver.simulate_clipboard_change(Some("Backup Entry 1".into()));
+        let _ = engine.handle_clipboard_change().unwrap();
+
+        let _ = engine
+            .save_snippet(None, "快捷回复", "收到，马上处理！", "ok")
+            .unwrap();
+
+        // 2. 导出归档包
+        let archive_file = temp_dir.join("archive.clipbak");
+        let manifest = engine.export_backup(&archive_file).unwrap();
+        assert_eq!(manifest.entry_count, 1);
+        assert_eq!(manifest.snippet_count, 4); // 3条系统预置短语 + 1条测试新增短语
+        assert!(archive_file.exists());
+
+        // 3. 清空当前引擎数据 (模拟全新安装或数据清空)
+        engine.clear_history().unwrap();
+        assert_eq!(engine.get_entries(10).unwrap().len(), 0);
+
+        // 4. 解包还原
+        let imported = engine.import_backup(&archive_file).unwrap();
+        assert_eq!(imported.entry_count, 1);
+
+        // 5. 验证数据已完整恢复
+        let restored_list = engine.get_entries(10).unwrap();
+        assert_eq!(restored_list.len(), 1);
+        assert_eq!(restored_list[0].content, "Backup Entry 1");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }
