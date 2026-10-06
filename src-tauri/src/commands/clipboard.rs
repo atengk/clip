@@ -4,6 +4,7 @@
 //! @since 2026-10-06
 
 use crate::commands::AppState;
+use crate::engine::transform::TransformAction;
 use crate::storage::ClipboardEntry;
 use std::thread;
 use std::time::Duration;
@@ -89,6 +90,57 @@ pub fn paste_entry(
         .engine
         .paste_entry(id)
         .map_err(|e| format!("执行极速回填失败: {e}"))
+}
+
+/// 针对指定条目执行格式清洗与转换并回填至前台原活动窗口
+///
+/// @param app Tauri 应用程序句柄
+/// @param state 全局应用共享状态
+/// @param id 待回填条目的唯一 ID
+/// @param action 格式清洗与转换动作类型
+/// @return 转换后的文本结果
+#[tauri::command]
+pub fn transform_and_paste_entry(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: i64,
+    action: TransformAction,
+) -> Result<String, String> {
+    // 1. 先行计算转换结果并严格校验（若为非法 JSON 等立即返回错误，窗口绝不提前隐藏）
+    let transformed = state
+        .engine
+        .transform_entry(id, action)
+        .map_err(|e| format!("{e}"))?;
+
+    // 2. 校验成功后隐藏当前悬浮窗口并交还系统焦点
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.hide();
+    }
+
+    // 3. 预留 50ms 窗口调度等待，确保系统焦点已稳定切回原前台进程
+    thread::sleep(Duration::from_millis(50));
+
+    // 4. 将转换后的文本注入系统剪贴板并模拟按键发送
+    state
+        .engine
+        .paste_text(&transformed)
+        .map_err(|e| format!("执行极速回填失败: {e}"))?;
+
+    Ok(transformed)
+}
+
+/// 强制以纯文本格式回填指定条目至前台原活动窗口 (Shift + Enter 专用)
+///
+/// @param app Tauri 应用程序句柄
+/// @param state 全局应用共享状态
+/// @param id 待回填条目的唯一 ID
+#[tauri::command]
+pub fn paste_plain_entry(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<String, String> {
+    transform_and_paste_entry(app, state, id, TransformAction::PlainText)
 }
 
 /// 主动隐藏当前窗口

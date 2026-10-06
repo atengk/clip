@@ -9,7 +9,8 @@ pub mod pal;
 pub mod storage;
 
 use crate::commands::clipboard::{
-    get_history, hide_window, paste_entry, search_history, toggle_pin,
+    get_history, hide_window, paste_entry, paste_plain_entry, search_history, toggle_pin,
+    transform_and_paste_entry,
 };
 use crate::commands::AppState;
 use crate::engine::ClipboardEngine;
@@ -118,6 +119,8 @@ pub fn run() {
             get_history,
             search_history,
             paste_entry,
+            paste_plain_entry,
+            transform_and_paste_entry,
             hide_window,
             toggle_pin
         ])

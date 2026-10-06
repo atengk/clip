@@ -25,11 +25,49 @@ interface ClipboardEntry {
 /** 2MB 字节/字符阈值，用于前端展示超大文本标签与长字符串 DOM 裁剪保护 */
 const LARGE_TEXT_THRESHOLD = 2 * 1024 * 1024;
 
+/**
+ * 支持的格式清洗与转换动作类型枚举
+ */
+export type ActionKey =
+  | "trim"
+  | "plain_text"
+  | "uppercase"
+  | "lowercase"
+  | "camel_case"
+  | "snake_case"
+  | "json_prettify"
+  | "json_minify";
+
+/**
+ * 文本清洗与格式转换动作项定义
+ */
+interface ActionItem {
+  key: ActionKey;
+  label: string;
+  description: string;
+  icon: string;
+  hotkey: string;
+}
+
+const TRANSFORM_ACTIONS: ActionItem[] = [
+  { key: "trim", label: "去除多余空白与换行 (Trim)", description: "剔除首尾空白，折叠连续多行空白", icon: "✂️", hotkey: "1" },
+  { key: "plain_text", label: "强制纯文本 (Plain Text)", description: "剔除所有控制字符，规范换行", icon: "📄", hotkey: "2" },
+  { key: "uppercase", label: "转为全部大写 (UPPERCASE)", description: "英文字符全部转为大写", icon: "🔠", hotkey: "3" },
+  { key: "lowercase", label: "转为全部小写 (lowercase)", description: "英文字符全部转为小写", icon: "🔡", hotkey: "4" },
+  { key: "camel_case", label: "转为小驼峰 (camelCase)", description: "转换为小驼峰变量规范", icon: "🐫", hotkey: "5" },
+  { key: "snake_case", label: "转为下划线 (snake_case)", description: "转换为蛇形下划线规范", icon: "🐍", hotkey: "6" },
+  { key: "json_prettify", label: "JSON 语法美化 (Prettify)", description: "校验 JSON 并按 2 空格缩进排版", icon: "✨", hotkey: "7" },
+  { key: "json_minify", label: "JSON 紧凑压缩 (Minify)", description: "去除所有空行与缩进压缩为单行", icon: "📦", hotkey: "8" },
+];
+
 export const App: React.FC = () => {
   const [query, setQuery] = useState<string>("");
   const [entries, setEntries] = useState<ClipboardEntry[]>([]);
   const [selectedIndex, setSelectedIndex] = useState<number>(0);
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
+  const [actionPaletteOpen, setActionPaletteOpen] = useState<boolean>(false);
+  const [actionSelectedIndex, setActionSelectedIndex] = useState<number>(0);
+  const [transformError, setTransformError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -66,6 +104,37 @@ export const App: React.FC = () => {
   }, []);
 
   /**
+   * 触发指定条目的动作转换与极速回填
+   *
+   * @param id 条目唯一主键 ID
+   * @param actionKey 转换动作标识
+   */
+  const handleTransformAndPaste = useCallback(async (id: number, actionKey: ActionKey) => {
+    setTransformError(null);
+    try {
+      await invoke("transform_and_paste_entry", { id, action: actionKey });
+      setActionPaletteOpen(false);
+    } catch (err: unknown) {
+      const msg = typeof err === "string" ? err : "执行格式转换失败";
+      setTransformError(msg);
+      setTimeout(() => setTransformError(null), 3000);
+    }
+  }, []);
+
+  /**
+   * 强制以纯文本格式回填当前条目 (Shift + Enter 专用)
+   *
+   * @param id 条目唯一主键 ID
+   */
+  const handlePastePlain = useCallback(async (id: number) => {
+    try {
+      await invoke("paste_plain_entry", { id });
+    } catch (err) {
+      console.error("纯文本回填失败:", err);
+    }
+  }, []);
+
+  /**
    * 切换指定条目的置顶固定状态 (Pin / Unpin)
    *
    * @param id 条目唯一 ID
@@ -89,6 +158,7 @@ export const App: React.FC = () => {
    * 主动隐藏悬浮面板
    */
   const handleClose = useCallback(async () => {
+    setActionPaletteOpen(false);
     try {
       await invoke("hide_window");
     } catch (err) {
@@ -117,6 +187,7 @@ export const App: React.FC = () => {
       setQuery("");
       fetchEntries("");
       setSelectedIndex(0);
+      setActionPaletteOpen(false);
       setTimeout(() => {
         inputRef.current?.focus();
         inputRef.current?.select();
@@ -139,19 +210,88 @@ export const App: React.FC = () => {
   // 全局键盘导航处理
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // 1. Esc: 瞬间无感自隐并释放焦点
+      // 1. 输入法合成状态保护：正在输入中文拼音时，Enter 仅用于确认上屏，绝不触发粘贴
+      if (e.isComposing) {
+        return;
+      }
+
+      // 2. Action Palette 处于激活态时的键盘路由
+      if (actionPaletteOpen) {
+        if (e.key === "Escape" || (e.ctrlKey && (e.key === "k" || e.key === "K")) || e.key === "Tab") {
+          e.preventDefault();
+          setActionPaletteOpen(false);
+          return;
+        }
+
+        if (e.key === "ArrowDown") {
+          e.preventDefault();
+          setActionSelectedIndex((prev) => (prev < TRANSFORM_ACTIONS.length - 1 ? prev + 1 : 0));
+          return;
+        }
+
+        if (e.key === "ArrowUp") {
+          e.preventDefault();
+          setActionSelectedIndex((prev) => (prev > 0 ? prev - 1 : TRANSFORM_ACTIONS.length - 1));
+          return;
+        }
+
+        if (e.key === "Enter") {
+          e.preventDefault();
+          const current = entries[selectedIndex];
+          const action = TRANSFORM_ACTIONS[actionSelectedIndex];
+          if (current && action) {
+            handleTransformAndPaste(current.id, action.key);
+          }
+          return;
+        }
+
+        // 数字键快捷触发对应动作 (1~8)
+        if (e.key >= "1" && e.key <= "8") {
+          const actionIdx = parseInt(e.key, 10) - 1;
+          const current = entries[selectedIndex];
+          const action = TRANSFORM_ACTIONS[actionIdx];
+          if (current && action) {
+            e.preventDefault();
+            handleTransformAndPaste(current.id, action.key);
+            return;
+          }
+        }
+
+        // 动作浮层开启时，彻底拦截其它所有按键输入，杜绝穿透修改背景搜索框
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+
+      // 3. 主列表状态下的按键调度
+      // Esc: 瞬间无感自隐并释放焦点
       if (e.key === "Escape") {
         e.preventDefault();
         handleClose();
         return;
       }
 
-      // 2. 输入法合成状态保护：正在输入中文拼音时，Enter 仅用于确认上屏，绝不触发粘贴
-      if (e.isComposing) {
+      // Tab 或 Ctrl+K: 唤出 Action Palette 动作浮层
+      if ((e.ctrlKey && (e.key === "k" || e.key === "K")) || e.key === "Tab") {
+        e.preventDefault();
+        if (entries.length > 0 && entries[selectedIndex]) {
+          setActionSelectedIndex(0);
+          setActionPaletteOpen(true);
+        }
         return;
       }
 
-      // 3. Alt + P 快捷切换当前选中项置顶
+      // Shift + Enter: 强制纯文本格式极速回填
+      if (e.shiftKey && e.key === "Enter") {
+        e.preventDefault();
+        const current = entries[selectedIndex];
+        if (current) {
+          handlePastePlain(current.id);
+        }
+        return;
+      }
+
+      // Alt + P 快捷切换当前选中项置顶
       if (e.altKey && (e.key === "p" || e.key === "P")) {
         e.preventDefault();
         const current = entries[selectedIndex];
@@ -161,7 +301,7 @@ export const App: React.FC = () => {
         return;
       }
 
-      // 4. 动态序号极速回填：Alt + 1~9 强制回填，或输入框无内容/非输入态敲数字键回填
+      // 动态序号极速回填：Alt + 1~9 强制回填，或输入框无内容/非输入态敲数字键回填
       const isNumberKey = e.key >= "1" && e.key <= "9";
       const shouldFastPasteNumber =
         (e.altKey && isNumberKey) ||
@@ -177,7 +317,7 @@ export const App: React.FC = () => {
         }
       }
 
-      // 5. 上下方向键导航
+      // 上下方向键导航
       if (e.key === "ArrowDown") {
         e.preventDefault();
         setSelectedIndex((prev) => (prev < entries.length - 1 ? prev + 1 : prev));
@@ -196,7 +336,19 @@ export const App: React.FC = () => {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [entries, selectedIndex, query, fetchEntries, handleClose, handlePaste, handleTogglePin]);
+  }, [
+    entries,
+    selectedIndex,
+    query,
+    actionPaletteOpen,
+    actionSelectedIndex,
+    fetchEntries,
+    handleClose,
+    handlePaste,
+    handlePastePlain,
+    handleTransformAndPaste,
+    handleTogglePin,
+  ]);
 
   return (
     <div className="panel-container">
@@ -214,9 +366,10 @@ export const App: React.FC = () => {
           />
         </div>
         <div className="shortcut-hints">
-          <span className="hint-tag"><kbd>1~9</kbd> / <kbd>Alt+1~9</kbd> 粘贴</span>
+          <span className="hint-tag"><kbd>Tab</kbd> / <kbd>Ctrl+K</kbd> 动作</span>
+          <span className="hint-tag"><kbd>Shift+↵</kbd> 纯文本</span>
+          <span className="hint-tag"><kbd>1~9</kbd> 回填</span>
           <span className="hint-tag"><kbd>Alt+P</kbd> 置顶</span>
-          <span className="hint-tag"><kbd>↵</kbd> 回填</span>
           <span className="hint-tag"><kbd>Esc</kbd> 自隐</span>
         </div>
       </header>
@@ -280,6 +433,18 @@ export const App: React.FC = () => {
                 </div>
                 <div className="item-meta">
                   <button
+                    className="action-btn"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setSelectedIndex(index);
+                      setActionSelectedIndex(0);
+                      setActionPaletteOpen(true);
+                    }}
+                    title="动作面板 (Ctrl+K / Tab)"
+                  >
+                    ⚡
+                  </button>
+                  <button
                     className={`pin-btn ${item.is_pinned ? "active" : ""}`}
                     onClick={(e) => handleTogglePin(item.id, e)}
                     title={item.is_pinned ? "取消置顶" : "置顶条目 (Alt+P)"}
@@ -297,6 +462,57 @@ export const App: React.FC = () => {
           })
         )}
       </div>
+
+      {actionPaletteOpen && entries[selectedIndex] && (
+        <div
+          className="action-palette-overlay"
+          onClick={() => setActionPaletteOpen(false)}
+        >
+          <div
+            className="action-palette"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="palette-header">
+              <div className="palette-title">
+                <span>⚡ 动作面板 (Action Palette)</span>
+              </div>
+              {transformError ? (
+                <div className="palette-error">⚠️ {transformError}</div>
+              ) : (
+                <div className="palette-sub">
+                  目标条目: {entries[selectedIndex].content.slice(0, 48).replace(/\n/g, " ")}...
+                </div>
+              )}
+            </div>
+            <div className="palette-list">
+              {TRANSFORM_ACTIONS.map((action, idx) => {
+                const isActionSelected = idx === actionSelectedIndex;
+                return (
+                  <div
+                    key={action.key}
+                    className={`palette-item ${isActionSelected ? "selected" : ""}`}
+                    onClick={() => handleTransformAndPaste(entries[selectedIndex].id, action.key)}
+                    onMouseEnter={() => setActionSelectedIndex(idx)}
+                  >
+                    <span className="palette-icon">{action.icon}</span>
+                    <div className="palette-info">
+                      <span className="palette-label">{action.label}</span>
+                      <span className="palette-desc">{action.description}</span>
+                    </div>
+                    <span className="palette-hotkey">
+                      <kbd>{action.hotkey}</kbd>
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="palette-footer">
+              <span><kbd>↵</kbd> / <kbd>1~8</kbd> 执行并回填</span>
+              <span><kbd>Esc</kbd> 取消返回</span>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

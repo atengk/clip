@@ -7,9 +7,11 @@
 
 pub mod pinyin;
 pub mod privacy;
+pub mod transform;
 
 use crate::engine::pinyin::PinyinMatcher;
 use crate::engine::privacy::PrivacyFilter;
+use crate::engine::transform::{TextTransformer, TransformAction};
 use crate::pal::{PalError, PlatformDriver};
 use crate::storage::{ClipboardEntry, Storage, StorageError};
 use std::sync::{Arc, Mutex};
@@ -37,6 +39,8 @@ pub enum EngineError {
     Storage(#[from] StorageError),
     #[error("目标条目未找到: {0}")]
     EntryNotFound(i64),
+    #[error("格式转换失败: {0}")]
+    Transform(String),
 }
 
 /// 剪贴板状态机核心引擎
@@ -194,29 +198,69 @@ impl ClipboardEngine {
         Ok(is_pinned)
     }
 
-    /// 触发指定条目的极速回填
+    /// 将任意文本写入系统剪贴板并模拟触发极速回填
     ///
-    /// 将目标文本注入系统剪贴板，设置回填防环抑制窗口，并通过驱动模拟发送粘贴快捷键。
+    /// 自动注入 800ms 防环抑制窗口并调用底层驱动发送粘贴按键。
+    ///
+    /// @param text 待粘贴的目标文本
+    pub fn paste_text(&self, text: &str) -> Result<(), EngineError> {
+        // 1. 注入回填防环抑制窗口 (800ms)
+        {
+            let mut suppression_guard = self.paste_suppression.lock().unwrap();
+            *suppression_guard = Some((text.to_string(), Instant::now()));
+        }
+
+        // 2. 写入系统剪贴板并模拟按键注入
+        self.driver.write_text(text)?;
+        self.driver.send_paste()?;
+
+        Ok(())
+    }
+
+    /// 触发指定条目的极速回填
     ///
     /// @param id 目标条目主键 ID
     pub fn paste_entry(&self, id: i64) -> Result<(), EngineError> {
-        // 1. 根据 ID 查询目标条目
         let entry = self
             .storage
             .get_entry_by_id(id)?
             .ok_or(EngineError::EntryNotFound(id))?;
 
-        // 2. 注入回填防环抑制窗口 (800ms)
-        {
-            let mut suppression_guard = self.paste_suppression.lock().unwrap();
-            *suppression_guard = Some((entry.content.clone(), Instant::now()));
-        }
+        self.paste_text(&entry.content)
+    }
 
-        // 3. 写入系统剪贴板并模拟按键注入
-        self.driver.write_text(&entry.content)?;
-        self.driver.send_paste()?;
+    /// 纯函数转换指定条目内容（仅校验与计算，不触发剪贴板和窗口操作）
+    ///
+    /// @param id 目标条目主键 ID
+    /// @param action 格式清洗与转换动作类型
+    /// @return 转换后的最终文本
+    pub fn transform_entry(
+        &self,
+        id: i64,
+        action: TransformAction,
+    ) -> Result<String, EngineError> {
+        let entry = self
+            .storage
+            .get_entry_by_id(id)?
+            .ok_or(EngineError::EntryNotFound(id))?;
 
-        Ok(())
+        TextTransformer::transform(&entry.content, action)
+            .map_err(|e| EngineError::Transform(e.to_string()))
+    }
+
+    /// 转换指定条目内容并执行极速回填
+    ///
+    /// @param id 目标条目主键 ID
+    /// @param action 格式清洗与转换动作类型
+    /// @return 转换后的最终文本
+    pub fn transform_and_paste_entry(
+        &self,
+        id: i64,
+        action: TransformAction,
+    ) -> Result<String, EngineError> {
+        let transformed = self.transform_entry(id, action)?;
+        self.paste_text(&transformed)?;
+        Ok(transformed)
     }
 }
 
@@ -369,5 +413,34 @@ mod tests {
 
         let list_after = engine.get_entries(10).unwrap();
         assert_eq!(list_after.len(), 1);
+    }
+
+    #[test]
+    fn test_engine_transform_and_paste_entry() {
+        let (driver, engine) = setup_engine();
+
+        // 1. 入库原始文本
+        driver.write_text("hello_world_variable").unwrap();
+        let entry = engine.handle_clipboard_change().unwrap().unwrap();
+
+        // 2. 转换成 CamelCase 并回填
+        let res = engine
+            .transform_and_paste_entry(entry.id, TransformAction::CamelCase)
+            .unwrap();
+        assert_eq!(res, "helloWorldVariable");
+
+        // 验证 Mock 平台驱动收到了转换后的文本并触发了粘贴
+        let current_clipboard = driver.read_text().unwrap().unwrap();
+        assert_eq!(current_clipboard, "helloWorldVariable");
+        assert_eq!(driver.paste_count(), 1);
+
+        // 3. 转换成 UPPERCASE 并回填
+        let res_upper = engine
+            .transform_and_paste_entry(entry.id, TransformAction::Uppercase)
+            .unwrap();
+        assert_eq!(res_upper, "HELLO_WORLD_VARIABLE");
+        let current_clipboard_upper = driver.read_text().unwrap().unwrap();
+        assert_eq!(current_clipboard_upper, "HELLO_WORLD_VARIABLE");
+        assert_eq!(driver.paste_count(), 2);
     }
 }
