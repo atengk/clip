@@ -215,6 +215,32 @@ kbd {
   flex-shrink: 0;
 }
 
+.tag-masked {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(48, 209, 88, 0.18);
+  color: #30d158;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.tag-revealed {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(255, 214, 10, 0.2);
+  color: #ffd60a;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
 .item-text {
   font-size: 13px;
   line-height: 1.4;

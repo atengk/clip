@@ -8,6 +8,7 @@
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { maskSensitiveContent } from "./utils/privacy";
 import "./App.css";
 
 /**
@@ -28,6 +29,7 @@ export const App: React.FC = () => {
   const [query, setQuery] = useState<string>("");
   const [entries, setEntries] = useState<ClipboardEntry[]>([]);
   const [selectedIndex, setSelectedIndex] = useState<number>(0);
+  const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -232,15 +234,27 @@ export const App: React.FC = () => {
             const isSelected = index === selectedIndex;
             const fastPasteIndex = index < 9 ? index + 1 : null;
             const isLargeText = item.content.length > LARGE_TEXT_THRESHOLD;
+            const { displayText: maskedText, isSensitive } = maskSensitiveContent(item.content);
+            const isHovered = index === hoveredIndex;
+            const isRevealed = isSensitive && isHovered;
+            const activeText = isSensitive && !isRevealed ? maskedText : item.content;
             // 对超大文本进行 DOM 渲染截断保护，避免前端视图卡死
-            const displayText = isLargeText ? item.content.slice(0, 300) + "..." : item.content;
+            const displayText = isLargeText ? activeText.slice(0, 300) + "..." : activeText;
 
             return (
               <div
                 key={item.id}
                 className={`panel-item ${isSelected ? "selected" : ""} ${item.is_pinned ? "pinned" : ""}`}
                 onClick={() => handlePaste(item.id)}
-                onMouseEnter={() => setSelectedIndex(index)}
+                onMouseEnter={() => {
+                  setSelectedIndex(index);
+                  setHoveredIndex(index);
+                }}
+                onMouseLeave={() => {
+                  if (hoveredIndex === index) {
+                    setHoveredIndex(null);
+                  }
+                }}
               >
                 <div className="item-badge">
                   {item.is_pinned ? (
@@ -254,6 +268,13 @@ export const App: React.FC = () => {
                 <div className="item-content">
                   <div className="item-text-line">
                     {isLargeText && <span className="tag-large">[超大文本]</span>}
+                    {isSensitive && (
+                      isRevealed ? (
+                        <span className="tag-revealed" title="鼠标悬停已临时显隐明文，回填仍输出真实原文">👁️ 临时显隐</span>
+                      ) : (
+                        <span className="tag-masked" title="敏感凭据已防窥脱敏，鼠标悬停可临时显隐明文">🔒 掩码保护</span>
+                      )
+                    )}
                     <span className="item-text">{displayText}</span>
                   </div>
                 </div>

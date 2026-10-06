@@ -7,21 +7,25 @@ use crate::pal::{PalError, PlatformDriver};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread;
-use windows::Win32::Foundation::{HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::DataExchange::{
-    AddClipboardFormatListener, CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard,
+    AddClipboardFormatListener, CloseClipboard, EmptyClipboard, GetClipboardData,
+    IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW,
     RemoveClipboardFormatListener, SetClipboardData,
 };
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+use windows::Win32::System::Threading::{
+    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
     VIRTUAL_KEY, VK_CONTROL, VK_V,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetForegroundWindow,
-    GetMessageW, PostQuitMessage, RegisterClassW, SetForegroundWindow, TranslateMessage,
-    CS_HREDRAW, CS_VREDRAW, MSG, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLIPBOARDUPDATE, WM_DESTROY,
-    WNDCLASSW,
+    GetMessageW, GetWindowThreadProcessId, PostQuitMessage, RegisterClassW, SetForegroundWindow,
+    TranslateMessage, CS_HREDRAW, CS_VREDRAW, MSG, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WM_CLIPBOARDUPDATE, WM_DESTROY, WNDCLASSW,
 };
 
 /// 标准 Unicode 纯文本剪贴板格式 ID (CF_UNICODETEXT = 13)
@@ -279,6 +283,87 @@ impl PlatformDriver for WindowsPlatformDriver {
             .map_err(|e| PalError::MonitorError(format!("创建监听线程失败: {e}")))?;
 
         Ok(())
+    }
+
+    fn is_clipboard_ignored(&self) -> Result<bool, PalError> {
+        unsafe {
+            // 1. 存在即丢弃格式检测 (Clipboard Viewer Ignore & ExcludeClipboardContentFromMonitorProcessing)
+            let ignore_format = RegisterClipboardFormatW(windows::core::w!("Clipboard Viewer Ignore"));
+            let exclude_monitor = RegisterClipboardFormatW(windows::core::w!("ExcludeClipboardContentFromMonitorProcessing"));
+
+            if ignore_format != 0 && IsClipboardFormatAvailable(ignore_format).is_ok() {
+                return Ok(true);
+            }
+            if exclude_monitor != 0 && IsClipboardFormatAvailable(exclude_monitor).is_ok() {
+                return Ok(true);
+            }
+
+            // 2. Windows 剪贴板历史协议 CanIncludeInClipboardHistory: DWORD 为 0 时排除，为 1 时允许
+            let history_format = RegisterClipboardFormatW(windows::core::w!("CanIncludeInClipboardHistory"));
+            if history_format != 0
+                && IsClipboardFormatAvailable(history_format).is_ok()
+                && open_clipboard_with_retry().is_ok()
+            {
+                let mut should_ignore = false;
+                if let Ok(handle) = GetClipboardData(history_format) {
+                    if !handle.0.is_null() {
+                        let ptr = GlobalLock(HGLOBAL(handle.0));
+                        if !ptr.is_null() {
+                            let val = *(ptr as *const u32);
+                            if val == 0 {
+                                should_ignore = true;
+                            }
+                            let _ = GlobalUnlock(HGLOBAL(handle.0));
+                        }
+                    }
+                }
+                let _ = CloseClipboard();
+                if should_ignore {
+                    return Ok(true);
+                }
+            }
+
+            Ok(false)
+        }
+    }
+
+    fn get_clipboard_source_process(&self) -> Result<Option<String>, PalError> {
+        unsafe {
+            let foreground = GetForegroundWindow();
+            if foreground.0.is_null() {
+                return Ok(None);
+            }
+            let mut pid: u32 = 0;
+            GetWindowThreadProcessId(foreground, Some(&mut pid));
+            if pid == 0 {
+                return Ok(None);
+            }
+            let process_handle = match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
+                Ok(h) => h,
+                Err(_) => return Ok(None),
+            };
+
+            let mut buffer = [0u16; 1024];
+            let mut size = buffer.len() as u32;
+            let query_res = QueryFullProcessImageNameW(
+                process_handle,
+                PROCESS_NAME_FORMAT(0),
+                windows::core::PWSTR(buffer.as_mut_ptr()),
+                &mut size,
+            );
+            let _ = CloseHandle(process_handle);
+
+            if query_res.is_ok() && size > 0 {
+                let full_path = String::from_utf16_lossy(&buffer[..size as usize]);
+                let file_name = std::path::Path::new(&full_path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.to_string());
+                return Ok(file_name);
+            }
+
+            Ok(None)
+        }
     }
 }
 

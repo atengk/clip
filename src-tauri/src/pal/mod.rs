@@ -45,4 +45,15 @@ pub trait PlatformDriver: Send + Sync {
     ///
     /// @param callback 剪贴板变更时的回调函数
     fn start_monitor(&self, callback: Arc<dyn Fn() + Send + Sync>) -> Result<(), PalError>;
+
+    /// 检查系统剪贴板是否携带密码管理器等私有排除标记 (如 Clipboard Viewer Ignore)
+    ///
+    /// @return 若存在忽略标记返回 Ok(true)，否则返回 Ok(false)
+    fn is_clipboard_ignored(&self) -> Result<bool, PalError>;
+
+    /// 获取触发当前剪贴板复制事件的来源进程名称 (如 "1password.exe")
+    ///
+    /// @return 进程名，未知时返回 Ok(None)
+    fn get_clipboard_source_process(&self) -> Result<Option<String>, PalError>;
 }
+

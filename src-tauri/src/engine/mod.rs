@@ -6,8 +6,10 @@
 //! @since 2026-10-06
 
 pub mod pinyin;
+pub mod privacy;
 
 use crate::engine::pinyin::PinyinMatcher;
+use crate::engine::privacy::PrivacyFilter;
 use crate::pal::{PalError, PlatformDriver};
 use crate::storage::{ClipboardEntry, Storage, StorageError};
 use std::sync::{Arc, Mutex};
@@ -44,6 +46,7 @@ pub struct ClipboardEngine {
     last_captured_text: Mutex<Option<String>>,
     paste_suppression: Mutex<Option<(String, Instant)>>,
     max_capacity: usize,
+    privacy_filter: PrivacyFilter,
 }
 
 impl ClipboardEngine {
@@ -58,6 +61,7 @@ impl ClipboardEngine {
             last_captured_text: Mutex::new(None),
             paste_suppression: Mutex::new(None),
             max_capacity: DEFAULT_MAX_CAPACITY,
+            privacy_filter: PrivacyFilter::new(),
         }
     }
 
@@ -70,19 +74,35 @@ impl ClipboardEngine {
         self
     }
 
+    /// 设置自定义隐私安全过滤器（用于测试或黑名单配置）
+    ///
+    /// @param filter 隐私安全过滤器
+    /// @return 链式返回 Self
+    pub fn with_privacy_filter(mut self, filter: PrivacyFilter) -> Self {
+        self.privacy_filter = filter;
+        self
+    }
+
     /// 处理剪贴板变更事件
     ///
-    /// 包含防环校验、已有历史 Bump-to-Top、超大文本 Payload Guard 索引熔断及 LRU 淘汰。
+    /// 包含隐私过滤拦截、防环校验、已有历史 Bump-to-Top、超大文本 Payload Guard 索引熔断及 LRU 淘汰。
     ///
-    /// @return 捕获或跃升的剪贴板实体；若被回填防环拦截则返回 Ok(None)
+    /// @return 捕获或跃升的剪贴板实体；若被拦截或抑制则返回 Ok(None)
     pub fn handle_clipboard_change(&self) -> Result<Option<ClipboardEntry>, EngineError> {
-        // 1. 从底层驱动安全读取当前剪贴板文本
+        // 1. 协议级标记与进程黑名单隐私拦截 (Privacy Filter)
+        let is_ignored = self.driver.is_clipboard_ignored()?;
+        let source_process = self.driver.get_clipboard_source_process()?;
+        if self.privacy_filter.should_ignore(is_ignored, source_process.as_deref()) {
+            return Ok(None);
+        }
+
+        // 2. 从底层驱动安全读取当前剪贴板文本
         let current_text = match self.driver.read_text()? {
             Some(t) if !t.trim().is_empty() => t,
             _ => return Ok(None),
         };
 
-        // 2. 回填防环检验：若处于主动回填的 800ms 抑制窗口内且内容匹配，则予以旁路
+        // 3. 回填防环检验：若处于主动回填的 800ms 抑制窗口内且内容匹配，则予以旁路
         {
             let mut suppression_guard = self.paste_suppression.lock().unwrap();
             if let Some((ref text, timestamp)) = *suppression_guard {
@@ -93,7 +113,7 @@ impl ClipboardEngine {
             }
         }
 
-        // 3. 检索已有历史记录执行 Bump-to-Top 策略（支持连续相同文本的置顶时间戳刷新）
+        // 4. 检索已有历史记录执行 Bump-to-Top 策略（支持连续相同文本的置顶时间戳刷新）
         if let Some(existing) = self.storage.find_by_content(&current_text)? {
             let bumped = self.storage.bump_to_top(existing.id)?;
             let _ = self.storage.prune_lru(self.max_capacity);
@@ -103,7 +123,7 @@ impl ClipboardEngine {
             return Ok(Some(bumped));
         }
 
-        // 4. 超大文本 Payload Guard 熔断保护：>2MB 文本仅截取前 200KB 参与全文检索索引
+        // 5. 超大文本 Payload Guard 熔断保护：>2MB 文本仅截取前 200KB 参与全文检索索引
         let index_text = if current_text.len() > LARGE_PAYLOAD_THRESHOLD_BYTES {
             let mut end = MAX_INDEX_PAYLOAD_BYTES;
             while end > 0 && !current_text.is_char_boundary(end) {
@@ -114,7 +134,7 @@ impl ClipboardEngine {
             &current_text[..]
         };
 
-        // 5. 拼音索引提取：限制最大字符数，毫秒级响应
+        // 6. 拼音索引提取：限制最大字符数，毫秒级响应
         let pinyin_source = if index_text.chars().count() > MAX_PINYIN_SOURCE_CHARS {
             let mut end_idx = 0;
             for (i, (byte_idx, _)) in index_text.char_indices().enumerate() {
@@ -135,10 +155,10 @@ impl ClipboardEngine {
         let pinyin_first = PinyinMatcher::to_first_letters_index(pinyin_source);
         let pinyin_full = PinyinMatcher::to_full_pinyin_index(pinyin_source);
 
-        // 6. 全量持久化原始文本，检索列使用截断索引文本
+        // 7. 全量持久化原始文本，检索列使用截断索引文本
         let entry = self.storage.insert_text(&current_text, index_text, &pinyin_first, &pinyin_full)?;
 
-        // 7. 触发 LRU 淘汰清理超容记录
+        // 8. 触发 LRU 淘汰清理超容记录
         let _ = self.storage.prune_lru(self.max_capacity);
 
         let mut last_guard = self.last_captured_text.lock().unwrap();
@@ -308,5 +328,46 @@ mod tests {
 
         let list = engine.get_entries(10).unwrap();
         assert!(list[0].is_pinned);
+    }
+
+    #[test]
+    fn test_engine_privacy_filter_protocol_flag() {
+        let (driver, engine) = setup_engine();
+
+        // 模拟外部密码管理器设置了 Clipboard Viewer Ignore 隐私排除标记
+        driver.simulate_privacy_flag(true);
+        driver.write_text("SuperSecretPassword123").unwrap();
+
+        let result = engine.handle_clipboard_change().unwrap();
+        assert!(result.is_none(), "携带隐私排除标记时必须丢弃");
+
+        // 校验存储层零记录
+        let list = engine.get_entries(10).unwrap();
+        assert_eq!(list.len(), 0, "SQLite 绝不可产生任何记录");
+    }
+
+    #[test]
+    fn test_engine_privacy_filter_blacklist_process() {
+        let (driver, engine) = setup_engine();
+
+        // 模拟来自黑名单进程 KeePass 的复制
+        driver.simulate_source_process(Some("KeePass.exe"));
+        driver.write_text("MasterKeyFromKeePass").unwrap();
+
+        let result = engine.handle_clipboard_change().unwrap();
+        assert!(result.is_none(), "来自黑名单进程的复制必须被旁路忽略");
+
+        // 校验存储层零记录
+        let list = engine.get_entries(10).unwrap();
+        assert_eq!(list.len(), 0, "SQLite 绝不可产生任何记录");
+
+        // 切换为安全正常进程 (例如 code.exe)，验证正常捕获
+        driver.simulate_source_process(Some("code.exe"));
+        driver.write_text("Normal Code Snippet").unwrap();
+        let normal = engine.handle_clipboard_change().unwrap().unwrap();
+        assert_eq!(normal.content, "Normal Code Snippet");
+
+        let list_after = engine.get_entries(10).unwrap();
+        assert_eq!(list_after.len(), 1);
     }
 }

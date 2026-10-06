@@ -4,7 +4,7 @@
 //! @since 2026-10-06
 
 use crate::pal::{PalError, PlatformDriver};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// 内存测试桩平台驱动
@@ -12,6 +12,8 @@ pub struct MockPlatformDriver {
     clipboard_text: Mutex<Option<String>>,
     paste_count: AtomicUsize,
     monitor_callback: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    is_ignored: AtomicBool,
+    source_process: Mutex<Option<String>>,
 }
 
 impl MockPlatformDriver {
@@ -21,12 +23,25 @@ impl MockPlatformDriver {
             clipboard_text: Mutex::new(None),
             paste_count: AtomicUsize::new(0),
             monitor_callback: Mutex::new(None),
+            is_ignored: AtomicBool::new(false),
+            source_process: Mutex::new(None),
         }
     }
 
     /// 获取模拟粘贴调用计数
     pub fn paste_count(&self) -> usize {
         self.paste_count.load(Ordering::SeqCst)
+    }
+
+    /// 模拟设置当前剪贴板隐私排除标记
+    pub fn simulate_privacy_flag(&self, ignored: bool) {
+        self.is_ignored.store(ignored, Ordering::SeqCst);
+    }
+
+    /// 模拟设置当前复制操作的来源进程名称
+    pub fn simulate_source_process(&self, process: Option<&str>) {
+        let mut guard = self.source_process.lock().unwrap();
+        *guard = process.map(|s| s.to_string());
     }
 
     /// 人工触发剪贴板变更事件，通知已注册的回调函数
@@ -73,6 +88,15 @@ impl PlatformDriver for MockPlatformDriver {
         *guard = Some(callback);
         Ok(())
     }
+
+    fn is_clipboard_ignored(&self) -> Result<bool, PalError> {
+        Ok(self.is_ignored.load(Ordering::SeqCst))
+    }
+
+    fn get_clipboard_source_process(&self) -> Result<Option<String>, PalError> {
+        let guard = self.source_process.lock().unwrap();
+        Ok(guard.clone())
+    }
 }
 
 #[cfg(test)]
@@ -90,6 +114,21 @@ mod tests {
         assert_eq!(driver.paste_count(), 0);
         driver.send_paste().unwrap();
         assert_eq!(driver.paste_count(), 1);
+    }
+
+    #[test]
+    fn test_mock_platform_driver_privacy_flags() {
+        let driver = MockPlatformDriver::new();
+        assert!(!driver.is_clipboard_ignored().unwrap());
+
+        driver.simulate_privacy_flag(true);
+        assert!(driver.is_clipboard_ignored().unwrap());
+
+        driver.simulate_source_process(Some("1password.exe"));
+        assert_eq!(
+            driver.get_clipboard_source_process().unwrap(),
+            Some("1password.exe".to_string())
+        );
     }
 
     #[test]
