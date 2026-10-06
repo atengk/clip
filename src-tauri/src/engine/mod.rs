@@ -8,11 +8,13 @@
 pub mod hash;
 pub mod pinyin;
 pub mod privacy;
+pub mod queue;
 pub mod snippet;
 pub mod transform;
 
 use crate::engine::pinyin::PinyinMatcher;
 use crate::engine::privacy::PrivacyFilter;
+use crate::engine::queue::{PasteQueueManager, QueueItem, QueueStatus};
 use crate::engine::snippet::{SnippetContext, SnippetEngine};
 use crate::engine::transform::{TextTransformer, TransformAction};
 use crate::pal::{PalError, PlatformDriver};
@@ -68,6 +70,7 @@ pub struct ClipboardEngine {
     max_capacity: usize,
     privacy_filter: PrivacyFilter,
     blob_dir: PathBuf,
+    queue_manager: Arc<PasteQueueManager>,
 }
 
 impl ClipboardEngine {
@@ -87,6 +90,7 @@ impl ClipboardEngine {
             max_capacity: DEFAULT_MAX_CAPACITY,
             privacy_filter: PrivacyFilter::new(),
             blob_dir: default_blob_dir,
+            queue_manager: Arc::new(PasteQueueManager::new()),
         }
     }
 
@@ -179,6 +183,11 @@ impl ClipboardEngine {
                     let bumped = self.storage.bump_to_top(existing.id)?;
                     let _ = self.storage.prune_lru(self.max_capacity);
                     let _ = self.prune_orphan_blobs();
+                    self.queue_manager.push(QueueItem {
+                        id: bumped.id,
+                        content: bumped.content.clone(),
+                        entry_type: bumped.entry_type.clone(),
+                    });
                     return Ok(Some(bumped));
                 }
 
@@ -195,6 +204,11 @@ impl ClipboardEngine {
                 let _ = self.storage.prune_lru(self.max_capacity);
                 let _ = self.prune_orphan_blobs();
 
+                self.queue_manager.push(QueueItem {
+                    id: entry.id,
+                    content: entry.content.clone(),
+                    entry_type: entry.entry_type.clone(),
+                });
                 return Ok(Some(entry));
             }
         }
@@ -224,6 +238,11 @@ impl ClipboardEngine {
 
             let mut last_guard = self.last_captured_text.lock().unwrap();
             *last_guard = Some(current_text);
+            self.queue_manager.push(QueueItem {
+                id: bumped.id,
+                content: bumped.content.clone(),
+                entry_type: bumped.entry_type.clone(),
+            });
             return Ok(Some(bumped));
         }
 
@@ -268,6 +287,11 @@ impl ClipboardEngine {
 
         let mut last_guard = self.last_captured_text.lock().unwrap();
         *last_guard = Some(current_text);
+        self.queue_manager.push(QueueItem {
+            id: entry.id,
+            content: entry.content.clone(),
+            entry_type: entry.entry_type.clone(),
+        });
         Ok(Some(entry))
     }
 
@@ -507,6 +531,80 @@ impl ClipboardEngine {
 
         self.paste_text(&rendered)?;
         Ok(rendered)
+    }
+
+    /// 获取队列连贴管理器的状态快照
+    pub fn get_paste_queue_status(&self) -> QueueStatus {
+        self.queue_manager.get_status()
+    }
+
+    /// 切换队列连贴模式 (开启/停止)
+    pub fn toggle_paste_queue(&self) -> bool {
+        self.queue_manager.toggle()
+    }
+
+    /// 开启队列连贴模式
+    pub fn start_paste_queue(&self) {
+        self.queue_manager.start();
+    }
+
+    /// 停止队列连贴模式
+    pub fn stop_paste_queue(&self) {
+        self.queue_manager.stop();
+    }
+
+    /// 获取底层队列连贴管理器引用
+    pub fn queue_manager(&self) -> &Arc<PasteQueueManager> {
+        &self.queue_manager
+    }
+
+    /// 从队列头部弹出一项内容并极速回填至外部目标窗口 (FIFO)
+    ///
+    /// 若出队后队列已空，状态机会自动将 is_active 置为 false 闭环。
+    ///
+    /// @return 弹出的项；若队列为空则返回 Ok(None)
+    pub fn paste_queue_pop(&self) -> Result<Option<QueueItem>, EngineError> {
+        let item = match self.queue_manager.pop() {
+            Some(i) => i,
+            None => return Ok(None),
+        };
+
+        if self.paste_entry(item.id).is_err() {
+            // 降级防御：若条目已被外部操作删除，若是文本则直接原样写入回填
+            if item.entry_type != "image" {
+                self.paste_text(&item.content)?;
+            }
+        }
+
+        Ok(Some(item))
+    }
+
+    /// 多选条目合并粘贴 (AC-4)
+    ///
+    /// 按传入 ID 顺序提取内容并按指定分隔符（默认换行符 "\n"）合并拼接后极速回填至目标前台窗口。
+    ///
+    /// @param ids 选中的条目主键 ID 数组
+    /// @param separator 合并拼接分隔符
+    /// @return 最终合并拼接并回填的文本字符串
+    pub fn paste_multiple_entries(
+        &self,
+        ids: &[i64],
+        separator: &str,
+    ) -> Result<String, EngineError> {
+        let mut parts = Vec::new();
+        for &id in ids {
+            if let Some(entry) = self.storage.get_entry_by_id(id)? {
+                if entry.entry_type == "text" {
+                    parts.push(entry.content);
+                }
+            }
+        }
+
+        let merged = parts.join(separator);
+        if !merged.is_empty() {
+            self.paste_text(&merged)?;
+        }
+        Ok(merged)
     }
 }
 
@@ -869,5 +967,86 @@ mod tests {
         let final_text = driver.read_text().unwrap().unwrap();
         assert_eq!(final_text, rendered);
         assert_eq!(driver.paste_count(), 1);
+    }
+
+    #[test]
+    fn test_engine_paste_queue_fifo_lifecycle() {
+        let (driver, engine) = setup_engine();
+
+        // 1. 开启连贴模式
+        assert!(!engine.get_paste_queue_status().is_active);
+        let toggled = engine.toggle_paste_queue();
+        assert!(toggled);
+        assert!(engine.get_paste_queue_status().is_active);
+
+        // 2. 连续复制三段文本 A, B, C
+        driver.simulate_clipboard_change(Some("First Data".into()));
+        let _ = engine.handle_clipboard_change().unwrap();
+
+        driver.simulate_clipboard_change(Some("Second Data".into()));
+        let _ = engine.handle_clipboard_change().unwrap();
+
+        driver.simulate_clipboard_change(Some("Third Data".into()));
+        let _ = engine.handle_clipboard_change().unwrap();
+
+        let status = engine.get_paste_queue_status();
+        assert_eq!(status.count, 3);
+        assert!(status.is_active);
+
+        // 3. 模拟在目标窗口连按回填 (FIFO 顺序)
+        let pop1 = engine.paste_queue_pop().unwrap().unwrap();
+        assert_eq!(pop1.content, "First Data");
+        assert_eq!(driver.read_text().unwrap().unwrap(), "First Data");
+        assert_eq!(driver.paste_count(), 1);
+        assert_eq!(engine.get_paste_queue_status().count, 2);
+        assert!(engine.get_paste_queue_status().is_active);
+
+        let pop2 = engine.paste_queue_pop().unwrap().unwrap();
+        assert_eq!(pop2.content, "Second Data");
+        assert_eq!(driver.read_text().unwrap().unwrap(), "Second Data");
+        assert_eq!(driver.paste_count(), 2);
+        assert_eq!(engine.get_paste_queue_status().count, 1);
+        assert!(engine.get_paste_queue_status().is_active);
+
+        let pop3 = engine.paste_queue_pop().unwrap().unwrap();
+        assert_eq!(pop3.content, "Third Data");
+        assert_eq!(driver.read_text().unwrap().unwrap(), "Third Data");
+        assert_eq!(driver.paste_count(), 3);
+
+        // 4. 全部出队后，队列清空且模式自动退出 (AC-3)
+        let final_status = engine.get_paste_queue_status();
+        assert_eq!(final_status.count, 0);
+        assert!(!final_status.is_active, "全部出队后连贴模式必须自动销毁闭环");
+        assert!(engine.paste_queue_pop().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_engine_paste_multiple_entries() {
+        let (driver, engine) = setup_engine();
+
+        driver.simulate_clipboard_change(Some("Line One".into()));
+        let e1 = engine.handle_clipboard_change().unwrap().unwrap();
+
+        driver.simulate_clipboard_change(Some("Line Two".into()));
+        let e2 = engine.handle_clipboard_change().unwrap().unwrap();
+
+        driver.simulate_clipboard_change(Some("Line Three".into()));
+        let e3 = engine.handle_clipboard_change().unwrap().unwrap();
+
+        // 验证多选以换行符合并粘贴
+        let merged = engine
+            .paste_multiple_entries(&[e1.id, e2.id, e3.id], "\n")
+            .unwrap();
+        assert_eq!(merged, "Line One\nLine Two\nLine Three");
+        assert_eq!(driver.read_text().unwrap().unwrap(), "Line One\nLine Two\nLine Three");
+        assert_eq!(driver.paste_count(), 1);
+
+        // 验证自定义逗号分隔符合并
+        let merged_comma = engine
+            .paste_multiple_entries(&[e3.id, e1.id], ", ")
+            .unwrap();
+        assert_eq!(merged_comma, "Line Three, Line One");
+        assert_eq!(driver.read_text().unwrap().unwrap(), "Line Three, Line One");
+        assert_eq!(driver.paste_count(), 2);
     }
 }

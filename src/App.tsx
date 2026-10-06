@@ -35,6 +35,24 @@ export interface Snippet {
 }
 
 /**
+ * 队列连贴单项数据结构 (工单 #9)
+ */
+export interface QueueItem {
+  id: number;
+  content: string;
+  entry_type: string;
+}
+
+/**
+ * 队列连贴当前全局状态视图 (工单 #9)
+ */
+export interface QueueStatus {
+  is_active: boolean;
+  count: number;
+  items: QueueItem[];
+}
+
+/**
  * 顶部激活 Tab 模式
  */
 export type ActiveTab = "history" | "snippets";
@@ -132,6 +150,16 @@ export const App: React.FC = () => {
   const [previewModalOpen, setPreviewModalOpen] = useState<boolean>(false);
   const [ocrTextMap, setOcrTextMap] = useState<Record<number, string>>({});
   const [ocrLoading, setOcrLoading] = useState<boolean>(false);
+
+  // 多选状态 (工单 #9 AC-4)
+  const [selectedIds, setSelectedIds] = useState<number[]>([]);
+
+  // 队列连贴状态 (工单 #9 AC-1 ~ AC-3)
+  const [queueStatus, setQueueStatus] = useState<QueueStatus>({
+    is_active: false,
+    count: 0,
+    items: [],
+  });
 
   // 常用短语编辑模态框与表单状态 (AC-1)
   const [snippetModalOpen, setSnippetModalOpen] = useState<boolean>(false);
@@ -275,6 +303,65 @@ export const App: React.FC = () => {
       setPreviewModalOpen(false);
     } catch (err) {
       console.error("回填常用短语失败:", err);
+    }
+  }, []);
+
+  /**
+   * 切换单个条目的多选勾选状态 (AC-4)
+   */
+  const handleToggleSelectItem = useCallback((id: number, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    setSelectedIds((prev) =>
+      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]
+    );
+  }, []);
+
+  /**
+   * 多选条目换行合并回填 (AC-4)
+   */
+  const handlePasteMultiple = useCallback(async (ids: number[]) => {
+    if (ids.length === 0) return;
+    try {
+      await invoke("paste_multiple_entries", { ids, separator: "\n" });
+      setSelectedIds([]);
+      setPreviewModalOpen(false);
+    } catch (err) {
+      console.error("多选合并回填失败:", err);
+    }
+  }, []);
+
+  /**
+   * 切换连贴收集模式 (AC-1)
+   */
+  const handleTogglePasteQueue = useCallback(async () => {
+    try {
+      const status = await invoke<QueueStatus>("toggle_paste_queue");
+      setQueueStatus(status);
+    } catch (err) {
+      console.error("切换连贴模式失败:", err);
+    }
+  }, []);
+
+  /**
+   * 停止连贴模式并清空队列 (AC-3)
+   */
+  const handleStopPasteQueue = useCallback(async () => {
+    try {
+      const status = await invoke<QueueStatus>("clear_paste_queue");
+      setQueueStatus(status);
+    } catch (err) {
+      console.error("停止连贴模式失败:", err);
+    }
+  }, []);
+
+  /**
+   * 连贴队列头部出队并回填 (AC-2)
+   */
+  const handlePasteQueuePop = useCallback(async () => {
+    try {
+      await invoke("paste_queue_pop");
+    } catch (err) {
+      console.error("连贴出队回填失败:", err);
     }
   }, []);
 
@@ -493,17 +580,28 @@ export const App: React.FC = () => {
   useEffect(() => {
     loadData(activeTab, "");
 
-    // 1. 监听系统剪贴板更新事件
+    // 1. 获取初始连贴状态 (AC-1)
+    invoke<QueueStatus>("get_paste_queue_status")
+      .then(setQueueStatus)
+      .catch((err) => console.error("获取连贴状态失败:", err));
+
+    // 2. 监听系统剪贴板更新事件
     const unlistenClipboard = listen<ClipboardEntry>("clipboard-changed", () => {
       loadData(activeTab, query);
     });
 
-    // 2. 监听窗口唤起展示事件 (初始化焦点与清空历史)
+    // 3. 监听队列连贴状态变更广播 (AC-1 ~ AC-3)
+    const unlistenQueue = listen<QueueStatus>("paste-queue-changed", (event) => {
+      setQueueStatus(event.payload);
+    });
+
+    // 4. 监听窗口唤起展示事件 (初始化焦点与清空历史)
     const unlistenPanelShown = listen("panel-shown", () => {
       setQuery("");
       setActiveTab("history");
       loadData("history", "");
       setSelectedIndex(0);
+      setSelectedIds([]);
       setActionPaletteOpen(false);
       setPreviewModalOpen(false);
       setSnippetModalOpen(false);
@@ -513,7 +611,7 @@ export const App: React.FC = () => {
       }, 20);
     });
 
-    // 3. 页面失焦无感自隐防御
+    // 5. 页面失焦无感自隐防御
     const handleBlur = () => {
       handleClose();
     };
@@ -521,6 +619,7 @@ export const App: React.FC = () => {
 
     return () => {
       unlistenClipboard.then((f) => f());
+      unlistenQueue.then((f) => f());
       unlistenPanelShown.then((f) => f());
       window.removeEventListener("blur", handleBlur);
     };
@@ -614,9 +713,13 @@ export const App: React.FC = () => {
       }
 
       // 5. 主列表状态下的按键调度
-      // Esc: 瞬间无感自隐并释放焦点
+      // Esc: 优先取消多选；若未多选则瞬间无感自隐并释放焦点 (AC-4)
       if (e.key === "Escape") {
         e.preventDefault();
+        if (selectedIds.length > 0) {
+          setSelectedIds([]);
+          return;
+        }
         handleClose();
         return;
       }
@@ -702,6 +805,27 @@ export const App: React.FC = () => {
         }
       }
 
+      // Shift + 上下键扩展多选范围 (工单 #9 AC-4)
+      if (e.shiftKey && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+        e.preventDefault();
+        const nextIndex =
+          e.key === "ArrowDown"
+            ? Math.min(selectedIndex + 1, displayItems.length - 1)
+            : Math.max(selectedIndex - 1, 0);
+        setSelectedIndex(nextIndex);
+        const targetItem = displayItems[nextIndex];
+        if (targetItem && !targetItem.isSnippet) {
+          setSelectedIds((prev) => {
+            const currentItem = displayItems[selectedIndex];
+            const set = new Set(prev);
+            if (currentItem && !currentItem.isSnippet) set.add(currentItem.id);
+            set.add(targetItem.id);
+            return Array.from(set);
+          });
+        }
+        return;
+      }
+
       // 上下方向键导航
       if (e.key === "ArrowDown") {
         e.preventDefault();
@@ -710,6 +834,18 @@ export const App: React.FC = () => {
         e.preventDefault();
         setSelectedIndex((prev) => (prev > 0 ? prev - 1 : 0));
       } else if (e.key === "Enter") {
+        // 多选模式下按回车以换行符合并粘贴至目标窗口 (AC-4)
+        if (selectedIds.length > 1) {
+          e.preventDefault();
+          handlePasteMultiple(selectedIds);
+          return;
+        }
+        if (selectedIds.length === 1) {
+          e.preventDefault();
+          handlePaste(selectedIds[0]);
+          setSelectedIds([]);
+          return;
+        }
         // 回车极速回填当前高亮条目 (AC-2 & AC-3)
         e.preventDefault();
         const current = displayItems[selectedIndex];
@@ -728,6 +864,7 @@ export const App: React.FC = () => {
   }, [
     displayItems,
     selectedIndex,
+    selectedIds,
     query,
     snippetModalOpen,
     actionPaletteOpen,
@@ -737,12 +874,54 @@ export const App: React.FC = () => {
     handlePaste,
     handlePastePlain,
     handlePasteSnippet,
+    handlePasteMultiple,
     handleTransformAndPaste,
     handleTogglePin,
     handleOpenCreateSnippet,
     handleTabChange,
     executeAction,
   ]);
+
+  const isHudView = typeof window !== "undefined" && window.location.search.includes("view=hud");
+
+  if (isHudView) {
+    return (
+      <div className="capsule-hud-standalone">
+        <div className="capsule-hud-main">
+          <div className="capsule-hud-header">
+            <span className="capsule-pulse-dot" />
+            <span className="capsule-hud-title">📥 连贴模式</span>
+            <span className="capsule-hud-count">{queueStatus.count} 项</span>
+          </div>
+          <div className="capsule-hud-sub">
+            {queueStatus.count > 0 ? (
+              <span>目标窗口连按 <kbd>Ctrl+V</kbd> 依次回填 (FIFO)</span>
+            ) : (
+              <span>等待复制入队，清空自动退出</span>
+            )}
+          </div>
+        </div>
+        <div className="capsule-hud-buttons">
+          {queueStatus.count > 0 && (
+            <button
+              className="capsule-action-btn pop"
+              onClick={handlePasteQueuePop}
+              title="手动出队回填下一项"
+            >
+              回填
+            </button>
+          )}
+          <button
+            className="capsule-action-btn stop"
+            onClick={handleStopPasteQueue}
+            title="退出连贴模式 (Alt+Shift+C)"
+          >
+            退出
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="panel-container">
@@ -762,11 +941,20 @@ export const App: React.FC = () => {
               ⚡ 常用短语
             </button>
           </div>
-          {activeTab === "snippets" && (
-            <button className="new-snippet-btn" onClick={handleOpenCreateSnippet} title="新建短语模板 (Ctrl+N)">
-              + 新建短语
+          <div className="tab-actions">
+            <button
+              className={`queue-toggle-btn ${queueStatus.is_active ? "active" : ""}`}
+              onClick={handleTogglePasteQueue}
+              title="切换队列连贴模式 (Alt+Shift+C)"
+            >
+              📥 {queueStatus.is_active ? `连贴中 (${queueStatus.count})` : "连贴收集 (Alt+Shift+C)"}
             </button>
-          )}
+            {activeTab === "snippets" && (
+              <button className="new-snippet-btn" onClick={handleOpenCreateSnippet} title="新建短语模板 (Ctrl+N)">
+                + 新建短语
+              </button>
+            )}
+          </div>
         </div>
 
         <div className="search-bar">
@@ -795,7 +983,8 @@ export const App: React.FC = () => {
             </>
           ) : (
             <>
-              <span className="hint-tag"><kbd>/</kbd> 短语命令</span>
+              <span className="hint-tag"><kbd>Alt+Shift+C</kbd> 连贴</span>
+              <span className="hint-tag"><kbd>Shift+↑↓</kbd> 多选</span>
               <span className="hint-tag"><kbd>Tab</kbd> / <kbd>Ctrl+K</kbd> 动作</span>
               <span className="hint-tag"><kbd>1~9</kbd> 回填</span>
               <span className="hint-tag"><kbd>Alt+P</kbd> 置顶</span>
@@ -885,11 +1074,20 @@ export const App: React.FC = () => {
             if (item.entry_type === "image") {
               const imgDetail = imageDetails[item.content];
               const ocrText = ocrTextMap[item.id];
+              const isItemMultiSelected = selectedIds.includes(item.id);
               return (
                 <div
                   key={`entry-${item.id}`}
-                  className={`panel-item image-item ${isSelected ? "selected" : ""} ${item.is_pinned ? "pinned" : ""}`}
-                  onClick={() => handlePaste(item.id)}
+                  className={`panel-item image-item ${isSelected ? "selected" : ""} ${item.is_pinned ? "pinned" : ""} ${isItemMultiSelected ? "multi-selected" : ""}`}
+                  onClick={(e) => {
+                    if (e.ctrlKey || e.metaKey || e.shiftKey) {
+                      handleToggleSelectItem(item.id, e);
+                    } else if (selectedIds.length > 0) {
+                      handleToggleSelectItem(item.id, e);
+                    } else {
+                      handlePaste(item.id);
+                    }
+                  }}
                   onMouseEnter={() => {
                     setSelectedIndex(index);
                     setHoveredIndex(index);
@@ -900,6 +1098,13 @@ export const App: React.FC = () => {
                     }
                   }}
                 >
+                  <div
+                    className={`item-checkbox ${isItemMultiSelected ? "checked" : ""}`}
+                    onClick={(e) => handleToggleSelectItem(item.id, e)}
+                    title="勾选此项参与多选合并粘贴"
+                  >
+                    {isItemMultiSelected ? "✓" : ""}
+                  </div>
                   <div className="item-badge">
                     {item.is_pinned ? (
                       <span className="badge-pin" title="置顶条目">📌</span>
@@ -971,12 +1176,21 @@ export const App: React.FC = () => {
             const isRevealed = isSensitive && isHovered;
             const activeText = isSensitive && !isRevealed ? maskedText : item.content;
             const displayText = isLargeText ? activeText.slice(0, 300) + "..." : activeText;
+            const isItemMultiSelected = selectedIds.includes(item.id);
 
             return (
               <div
                 key={`entry-${item.id}`}
-                className={`panel-item ${isSelected ? "selected" : ""} ${item.is_pinned ? "pinned" : ""}`}
-                onClick={() => handlePaste(item.id)}
+                className={`panel-item ${isSelected ? "selected" : ""} ${item.is_pinned ? "pinned" : ""} ${isItemMultiSelected ? "multi-selected" : ""}`}
+                onClick={(e) => {
+                  if (e.ctrlKey || e.metaKey || e.shiftKey) {
+                    handleToggleSelectItem(item.id, e);
+                  } else if (selectedIds.length > 0) {
+                    handleToggleSelectItem(item.id, e);
+                  } else {
+                    handlePaste(item.id);
+                  }
+                }}
                 onMouseEnter={() => {
                   setSelectedIndex(index);
                   setHoveredIndex(index);
@@ -987,6 +1201,13 @@ export const App: React.FC = () => {
                   }
                 }}
               >
+                <div
+                  className={`item-checkbox ${isItemMultiSelected ? "checked" : ""}`}
+                  onClick={(e) => handleToggleSelectItem(item.id, e)}
+                  title="勾选此项参与多选合并粘贴"
+                >
+                  {isItemMultiSelected ? "✓" : ""}
+                </div>
                 <div className="item-badge">
                   {item.is_pinned ? (
                     <span className="badge-pin" title="置顶条目">📌</span>
@@ -1040,6 +1261,70 @@ export const App: React.FC = () => {
           })
         )}
       </div>
+
+      {/* 多选合并回填浮动工具栏 (AC-4) */}
+      {selectedIds.length > 1 && (
+        <div className="multi-select-toolbar">
+          <div className="multi-select-info">
+            <span className="multi-select-badge">{selectedIds.length}</span>
+            <span>已选择 {selectedIds.length} 项 (按 Enter 换行合并粘贴，Esc 取消选择)</span>
+          </div>
+          <div className="multi-select-actions">
+            <button
+              className="multi-btn primary"
+              onClick={() => handlePasteMultiple(selectedIds)}
+              title="按换行符合并粘贴到当前活动窗口"
+            >
+              ↵ 换行合并粘贴
+            </button>
+            <button
+              className="multi-btn"
+              onClick={() => setSelectedIds([])}
+              title="取消多选 (Esc)"
+            >
+              取消
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* 队列连贴屏幕右下角计数胶囊 (Capsule HUD - AC-1, AC-2, AC-3) */}
+      {queueStatus.is_active && (
+        <div className="capsule-hud">
+          <div className="capsule-hud-main">
+            <div className="capsule-hud-header">
+              <span className="capsule-pulse-dot" />
+              <span className="capsule-hud-title">📥 连贴模式</span>
+              <span className="capsule-hud-count">{queueStatus.count} 项</span>
+            </div>
+            <div className="capsule-hud-sub">
+              {queueStatus.count > 0 ? (
+                <span>目标窗口连按 <kbd>Ctrl+V</kbd> 依次回填 (FIFO)</span>
+              ) : (
+                <span>等待复制入队，清空自动退出</span>
+              )}
+            </div>
+          </div>
+          <div className="capsule-hud-buttons">
+            {queueStatus.count > 0 && (
+              <button
+                className="capsule-action-btn pop"
+                onClick={handlePasteQueuePop}
+                title="手动回填下一项"
+              >
+                回填
+              </button>
+            )}
+            <button
+              className="capsule-action-btn stop"
+              onClick={handleStopPasteQueue}
+              title="退出连贴模式 (Alt+Shift+C)"
+            >
+              退出
+            </button>
+          </div>
+        </div>
+      )}
 
       {actionPaletteOpen && displayItems[selectedIndex]?.rawEntry && (
         <div

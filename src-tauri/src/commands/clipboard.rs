@@ -4,11 +4,12 @@
 //! @since 2026-10-06
 
 use crate::commands::AppState;
+use crate::engine::queue::{QueueItem, QueueStatus};
 use crate::engine::transform::TransformAction;
 use crate::storage::{ClipboardEntry, Snippet};
 use std::thread;
 use std::time::Duration;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 /// 获取剪贴板历史记录列表
 ///
@@ -290,5 +291,97 @@ pub fn paste_snippet(
         .engine
         .paste_snippet(id)
         .map_err(|e| format!("回填常用短语失败: {e}"))
+}
+
+/// 获取队列连贴当前全局状态快照
+///
+/// @param state 全局应用共享状态
+/// @return 队列连贴状态对象
+#[tauri::command]
+pub fn get_paste_queue_status(
+    state: State<'_, AppState>,
+) -> Result<QueueStatus, String> {
+    Ok(state.engine.get_paste_queue_status())
+}
+
+/// 切换队列连贴收集模式激活状态
+///
+/// @param app Tauri 应用程序句柄
+/// @param state 全局应用共享状态
+/// @return 切换后的最新队列连贴状态
+#[tauri::command]
+pub fn toggle_paste_queue(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<QueueStatus, String> {
+    let _ = state.engine.toggle_paste_queue();
+    let status = state.engine.get_paste_queue_status();
+    let _ = app.emit("paste-queue-changed", &status);
+    crate::sync_paste_queue_hud_and_shortcut(&app, &state.engine);
+    Ok(status)
+}
+
+/// 停止并清空连贴队列 (退出连贴模式)
+///
+/// @param app Tauri 应用程序句柄
+/// @param state 全局应用共享状态
+/// @return 清空后的最新队列状态
+#[tauri::command]
+pub fn clear_paste_queue(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<QueueStatus, String> {
+    state.engine.stop_paste_queue();
+    let status = state.engine.get_paste_queue_status();
+    let _ = app.emit("paste-queue-changed", &status);
+    crate::sync_paste_queue_hud_and_shortcut(&app, &state.engine);
+    Ok(status)
+}
+
+/// 连贴队列头部弹出一项并回填至外部目标窗口 (FIFO)
+///
+/// 若出队后队列已空，状态机会自动重置为非激活状态闭环。
+///
+/// @param app Tauri 应用程序句柄
+/// @param state 全局应用共享状态
+/// @return 弹出的项；若队列为空则返回 None
+#[tauri::command]
+pub fn paste_queue_pop(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<QueueItem>, String> {
+    let item = state
+        .engine
+        .paste_queue_pop()
+        .map_err(|e| format!("执行连贴出队回填失败: {e}"))?;
+    let status = state.engine.get_paste_queue_status();
+    let _ = app.emit("paste-queue-changed", &status);
+    crate::sync_paste_queue_hud_and_shortcut(&app, &state.engine);
+    Ok(item)
+}
+
+/// 多选条目合并拼接后回填至目标原活动窗口 (AC-4)
+///
+/// @param app Tauri 应用程序句柄
+/// @param state 全局应用共享状态
+/// @param ids 选中的条目主键 ID 列表
+/// @param separator 拼接分隔符 (默认换行符 "\n")
+/// @return 最终合并回填的文本字符串
+#[tauri::command]
+pub fn paste_multiple_entries(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    ids: Vec<i64>,
+    separator: Option<String>,
+) -> Result<String, String> {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.hide();
+    }
+    thread::sleep(Duration::from_millis(50));
+    let sep = separator.as_deref().unwrap_or("\n");
+    state
+        .engine
+        .paste_multiple_entries(&ids, sep)
+        .map_err(|e| format!("执行多选合并回填失败: {e}"))
 }
 

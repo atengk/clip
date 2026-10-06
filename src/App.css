@@ -1049,3 +1049,292 @@ kbd {
   opacity: 0.9;
   transform: translateY(-1px);
 }
+
+/* 顶部连贴模式切换按钮 */
+.queue-toggle-btn {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--border-color);
+  color: var(--text-muted);
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.queue-toggle-btn:hover {
+  background: rgba(255, 255, 255, 0.14);
+  color: var(--text-main);
+}
+
+.queue-toggle-btn.active {
+  background: rgba(16, 185, 129, 0.2);
+  border-color: rgba(16, 185, 129, 0.5);
+  color: #34d399;
+  font-weight: 500;
+  box-shadow: 0 0 10px rgba(16, 185, 129, 0.25);
+}
+
+/* 多选条目勾选框与高亮 */
+.item-checkbox {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  border: 1.5px solid rgba(255, 255, 255, 0.3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: 6px;
+  cursor: pointer;
+  flex-shrink: 0;
+  font-size: 11px;
+  color: #fff;
+  transition: all 0.15s ease;
+}
+
+.item-checkbox:hover {
+  border-color: var(--accent-color);
+  background: rgba(10, 132, 255, 0.15);
+}
+
+.item-checkbox.checked {
+  background: var(--accent-color);
+  border-color: var(--accent-color);
+}
+
+.panel-item.multi-selected {
+  background: rgba(10, 132, 255, 0.18) !important;
+  border-left: 3px solid var(--accent-color) !important;
+}
+
+/* 多选合并粘贴浮动操作栏 */
+.multi-select-toolbar {
+  position: absolute;
+  bottom: 12px;
+  left: 14px;
+  right: 14px;
+  background: rgba(24, 24, 27, 0.95);
+  border: 1px solid rgba(10, 132, 255, 0.4);
+  border-radius: 8px;
+  padding: 8px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(16px);
+  z-index: 90;
+  animation: slideUp 0.15s ease-out;
+}
+
+@keyframes slideUp {
+  from {
+    transform: translateY(12px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+.multi-select-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-main);
+}
+
+.multi-select-badge {
+  background: var(--accent-color);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 10px;
+}
+
+.multi-select-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.multi-btn {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--border-color);
+  color: var(--text-main);
+  padding: 5px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.multi-btn:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.multi-btn.primary {
+  background: var(--accent-color);
+  border-color: var(--accent-color);
+  color: #fff;
+  font-weight: 500;
+}
+
+.multi-btn.primary:hover {
+  opacity: 0.9;
+}
+
+/* 队列连贴屏幕右下角计数胶囊 (Capsule HUD - AC-1, AC-2, AC-3) */
+.capsule-hud {
+  position: fixed;
+  bottom: 16px;
+  right: 16px;
+  background: rgba(20, 20, 22, 0.95);
+  border: 1px solid rgba(16, 185, 129, 0.4);
+  border-radius: 12px;
+  padding: 10px 14px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.7), 0 0 16px rgba(16, 185, 129, 0.2);
+  backdrop-filter: blur(20px);
+  z-index: 9999;
+  animation: capsuleFadeIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes capsuleFadeIn {
+  from {
+    transform: scale(0.9) translateY(10px);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1) translateY(0);
+    opacity: 1;
+  }
+}
+
+.capsule-hud-main {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.capsule-hud-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.capsule-pulse-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #10b981;
+  box-shadow: 0 0 8px #10b981;
+  animation: pulseDot 1.5s infinite;
+}
+
+@keyframes pulseDot {
+  0% {
+    transform: scale(0.9);
+    opacity: 0.7;
+  }
+  50% {
+    transform: scale(1.2);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(0.9);
+    opacity: 0.7;
+  }
+}
+
+.capsule-hud-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #f5f5f7;
+}
+
+.capsule-hud-count {
+  background: rgba(16, 185, 129, 0.25);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.4);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 10px;
+}
+
+.capsule-hud-sub {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.capsule-hud-sub kbd {
+  background: rgba(255, 255, 255, 0.12);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-family: monospace;
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.capsule-hud-buttons {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.capsule-action-btn {
+  border: none;
+  border-radius: 6px;
+  padding: 5px 9px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.capsule-action-btn.pop {
+  background: #10b981;
+  color: #fff;
+  font-weight: 500;
+}
+
+.capsule-action-btn.pop:hover {
+  background: #059669;
+}
+
+.capsule-action-btn.stop {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text-muted);
+  border: 1px solid var(--border-color);
+}
+
+.capsule-action-btn.stop:hover {
+  background: rgba(239, 68, 68, 0.2);
+  border-color: rgba(239, 68, 68, 0.5);
+  color: #f87171;
+}
+
+/* 独立全局 HUD 窗口专用样式 (AC-1) */
+.capsule-hud-standalone {
+  width: 100vw;
+  height: 100vh;
+  margin: 0;
+  padding: 8px 12px;
+  background: rgba(20, 20, 22, 0.95);
+  border: 1px solid rgba(16, 185, 129, 0.4);
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+  user-select: none;
+}

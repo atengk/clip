@@ -21,6 +21,20 @@
         "skipTaskbar": true,
         "visible": false,
         "center": true
+      },
+      {
+        "label": "hud",
+        "title": "clip-hud",
+        "url": "/?view=hud",
+        "width": 260,
+        "height": 60,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "visible": false,
+        "resizable": false,
+        "shadow": false
       }
     ],
     "security": {
