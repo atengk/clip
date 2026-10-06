@@ -66,6 +66,12 @@ jobs:
           pnpm lint || true
         if: hashFiles('package.json') != ''
 
+      - name: 安装 Linux 系统依赖 (GTK / WebKit)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+        if: runner.os == 'Linux'
+
       - name: 安装 Rust 工具链
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -103,6 +109,5 @@ jobs:
         if: hashFiles('Cargo.toml') != '' || hashFiles('src-tauri/Cargo.toml') != ''
 
       - name: 验证 Windows 原生 API 编译通过
-        run: |
-          cargo check --all-targets || echo "等待首个 Rust 模块提交后激活原生校验"
+        run: cargo check --all-targets
         if: hashFiles('Cargo.toml') != '' || hashFiles('src-tauri/Cargo.toml') != ''

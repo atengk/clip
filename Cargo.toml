@@ -1,0 +1,13 @@
+[workspace]
+members = [
+    "src-tauri",
+]
+resolver = "2"
+
+# 生产构建二进制体积与性能极限调优规范
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true
