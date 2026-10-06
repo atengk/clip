@@ -45,6 +45,23 @@ pub fn search_history(
         .map_err(|e| format!("检索历史记录失败: {e}"))
 }
 
+/// 切换指定条目的置顶固定状态 (Pin / Unpin)
+///
+/// @param state 全局应用共享状态
+/// @param id 条目唯一 ID
+/// @return 切换后的置顶状态
+#[tauri::command]
+pub fn toggle_pin(
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<bool, String> {
+    state
+        .engine
+        .toggle_pin(id)
+        .map_err(|e| format!("更新置顶状态失败: {e}"))
+}
+
+
 
 /// 隐藏悬浮面板并将指定条目回填至前台原活动窗口
 ///

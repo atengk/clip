@@ -8,7 +8,9 @@ pub mod engine;
 pub mod pal;
 pub mod storage;
 
-use crate::commands::clipboard::{get_history, hide_window, paste_entry, search_history};
+use crate::commands::clipboard::{
+    get_history, hide_window, paste_entry, search_history, toggle_pin,
+};
 use crate::commands::AppState;
 use crate::engine::ClipboardEngine;
 use crate::pal::PlatformDriver;
@@ -116,7 +118,8 @@ pub fn run() {
             get_history,
             search_history,
             paste_entry,
-            hide_window
+            hide_window,
+            toggle_pin
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

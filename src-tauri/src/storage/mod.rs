@@ -38,13 +38,15 @@ pub struct ClipboardEntry {
 pub trait Storage: Send + Sync {
     /// 插入纯文本条目及检索索引
     ///
-    /// @param text 纯文本内容
+    /// @param text 完整纯文本内容
+    /// @param fts_content 全文检索截断索引内容 (超大文本截取前 200KB)
     /// @param pinyin_first 拼音首字母简拼索引
     /// @param pinyin_full 拼音全拼索引
     /// @return 成功返回持久化后的剪贴板条目对象
     fn insert_text(
         &self,
         text: &str,
+        fts_content: &str,
         pinyin_first: &str,
         pinyin_full: &str,
     ) -> Result<ClipboardEntry, StorageError>;
@@ -67,4 +69,29 @@ pub trait Storage: Send + Sync {
     /// @param limit 最大返回条数
     /// @return 匹配的历史条目列表
     fn search_entries(&self, query: &str, limit: usize) -> Result<Vec<ClipboardEntry>, StorageError>;
+
+    /// 切换指定条目的置顶固定状态 (Pin / Unpin)
+    ///
+    /// @param id 条目主键 ID
+    /// @return 切换后的置顶状态 (true 为已置顶，false 为取消置顶)
+    fn toggle_pin(&self, id: i64) -> Result<bool, StorageError>;
+
+    /// 精确根据纯文本内容查找历史已有条目
+    ///
+    /// @param text 待查找的纯文本
+    /// @return 存在返回 Some(ClipboardEntry)，不存在返回 Ok(None)
+    fn find_by_content(&self, text: &str) -> Result<Option<ClipboardEntry>, StorageError>;
+
+    /// 刷新已有条目的时间戳并重新置顶到最前 (Bump-to-Top)
+    ///
+    /// @param id 条目主键 ID
+    /// @return 更新后的条目实体
+    fn bump_to_top(&self, id: i64) -> Result<ClipboardEntry, StorageError>;
+
+    /// 执行 LRU 容量淘汰清理，永久豁免置顶条目
+    ///
+    /// @param max_capacity 非置顶条目最大保留容量 (如 1000)
+    /// @return 实际淘汰清理的记录条数
+    fn prune_lru(&self, max_capacity: usize) -> Result<usize, StorageError>;
 }
+

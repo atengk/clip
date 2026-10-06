@@ -1,5 +1,5 @@
 /**
- * 悬浮剪贴板历史面板，集成拼音模糊搜索框、数字键 1~9 动态极速回填与失焦自隐。
+ * 悬浮剪贴板历史面板，集成拼音模糊搜索框、置顶管理、超大文本熔断标注与失焦自隐。
  *
  * @author Ateng
  * @since 2026-10-06
@@ -20,6 +20,9 @@ interface ClipboardEntry {
   created_at: number;
   is_pinned: boolean;
 }
+
+/** 2MB 字节/字符阈值，用于前端展示超大文本标签与长字符串 DOM 裁剪保护 */
+const LARGE_TEXT_THRESHOLD = 2 * 1024 * 1024;
 
 export const App: React.FC = () => {
   const [query, setQuery] = useState<string>("");
@@ -59,6 +62,26 @@ export const App: React.FC = () => {
       console.error("回填剪贴板条目失败:", err);
     }
   }, []);
+
+  /**
+   * 切换指定条目的置顶固定状态 (Pin / Unpin)
+   *
+   * @param id 条目唯一 ID
+   */
+  const handleTogglePin = useCallback(
+    async (id: number, e?: React.MouseEvent) => {
+      if (e) {
+        e.stopPropagation();
+      }
+      try {
+        await invoke("toggle_pin", { id });
+        fetchEntries(query);
+      } catch (err) {
+        console.error("切换置顶状态失败:", err);
+      }
+    },
+    [fetchEntries, query]
+  );
 
   /**
    * 主动隐藏悬浮面板
@@ -126,7 +149,17 @@ export const App: React.FC = () => {
         return;
       }
 
-      // 3. 动态序号极速回填：Alt + 1~9 强制回填，或输入框无内容/非输入态敲数字键回填
+      // 3. Alt + P 快捷切换当前选中项置顶
+      if (e.altKey && (e.key === "p" || e.key === "P")) {
+        e.preventDefault();
+        const current = entries[selectedIndex];
+        if (current) {
+          handleTogglePin(current.id);
+        }
+        return;
+      }
+
+      // 4. 动态序号极速回填：Alt + 1~9 强制回填，或输入框无内容/非输入态敲数字键回填
       const isNumberKey = e.key >= "1" && e.key <= "9";
       const shouldFastPasteNumber =
         (e.altKey && isNumberKey) ||
@@ -142,7 +175,7 @@ export const App: React.FC = () => {
         }
       }
 
-      // 4. 上下方向键导航
+      // 5. 上下方向键导航
       if (e.key === "ArrowDown") {
         e.preventDefault();
         setSelectedIndex((prev) => (prev < entries.length - 1 ? prev + 1 : prev));
@@ -161,7 +194,7 @@ export const App: React.FC = () => {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [entries, selectedIndex, query, fetchEntries, handleClose, handlePaste]);
+  }, [entries, selectedIndex, query, fetchEntries, handleClose, handlePaste, handleTogglePin]);
 
   return (
     <div className="panel-container">
@@ -180,6 +213,7 @@ export const App: React.FC = () => {
         </div>
         <div className="shortcut-hints">
           <span className="hint-tag"><kbd>1~9</kbd> / <kbd>Alt+1~9</kbd> 粘贴</span>
+          <span className="hint-tag"><kbd>Alt+P</kbd> 置顶</span>
           <span className="hint-tag"><kbd>↵</kbd> 回填</span>
           <span className="hint-tag"><kbd>Esc</kbd> 自隐</span>
         </div>
@@ -197,26 +231,45 @@ export const App: React.FC = () => {
           entries.map((item, index) => {
             const isSelected = index === selectedIndex;
             const fastPasteIndex = index < 9 ? index + 1 : null;
+            const isLargeText = item.content.length > LARGE_TEXT_THRESHOLD;
+            // 对超大文本进行 DOM 渲染截断保护，避免前端视图卡死
+            const displayText = isLargeText ? item.content.slice(0, 300) + "..." : item.content;
 
             return (
               <div
                 key={item.id}
-                className={`panel-item ${isSelected ? "selected" : ""}`}
+                className={`panel-item ${isSelected ? "selected" : ""} ${item.is_pinned ? "pinned" : ""}`}
                 onClick={() => handlePaste(item.id)}
                 onMouseEnter={() => setSelectedIndex(index)}
               >
                 <div className="item-badge">
-                  {fastPasteIndex ? (
+                  {item.is_pinned ? (
+                    <span className="badge-pin" title="置顶条目">📌</span>
+                  ) : fastPasteIndex ? (
                     <span className="badge-num">{fastPasteIndex}</span>
                   ) : (
                     <span className="badge-dot">•</span>
                   )}
                 </div>
                 <div className="item-content">
-                  <div className="item-text">{item.content}</div>
+                  <div className="item-text-line">
+                    {isLargeText && <span className="tag-large">[超大文本]</span>}
+                    <span className="item-text">{displayText}</span>
+                  </div>
                 </div>
                 <div className="item-meta">
-                  <span className="item-len">{item.content.length} 字符</span>
+                  <button
+                    className={`pin-btn ${item.is_pinned ? "active" : ""}`}
+                    onClick={(e) => handleTogglePin(item.id, e)}
+                    title={item.is_pinned ? "取消置顶" : "置顶条目 (Alt+P)"}
+                  >
+                    {item.is_pinned ? "📌" : "📍"}
+                  </button>
+                  <span className="item-len">
+                    {isLargeText
+                      ? `${(item.content.length / (1024 * 1024)).toFixed(1)} MB`
+                      : `${item.content.length} 字符`}
+                  </span>
                 </div>
               </div>
             );

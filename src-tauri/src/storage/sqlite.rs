@@ -1,4 +1,4 @@
-//! SQLite 存储层实现，提供剪贴板历史条目的持久化存储、FTS5 全文索引同步与拼音/多词检索。
+//! SQLite 存储层实现，提供剪贴板历史条目的持久化存储、FTS5 全文索引同步、置顶及 LRU 容量淘汰。
 //!
 //! @author Ateng
 //! @since 2026-10-06
@@ -37,27 +37,28 @@ impl SqliteStorage {
         Ok(storage)
     }
 
-    /// 初始化数据表、FTS5 全文索引与触发器 (AC-5)
+    /// 初始化数据表、多列索引与 FTS5 触发器 (AC-5)
     fn init_tables(&self) -> Result<(), StorageError> {
         let conn = self.conn.lock().unwrap();
         conn.execute_batch(
             r#"
-            -- 1. 主业务存储表与多列索引
+            -- 1. 主业务存储表与多列索引 (排除大文本列的 B-Tree 索引以杜绝写放大)
             CREATE TABLE IF NOT EXISTS clipboard_entries (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 content TEXT NOT NULL,
                 entry_type TEXT NOT NULL,
+                fts_content TEXT NOT NULL DEFAULT '',
                 pinyin_first TEXT NOT NULL DEFAULT '',
                 pinyin_full TEXT NOT NULL DEFAULT '',
                 created_at INTEGER NOT NULL,
                 is_pinned INTEGER NOT NULL DEFAULT 0
             );
-            CREATE INDEX IF NOT EXISTS idx_entries_created_at ON clipboard_entries(created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_entries_order ON clipboard_entries(is_pinned DESC, created_at DESC, id DESC);
             CREATE INDEX IF NOT EXISTS idx_entries_pinyin_first ON clipboard_entries(pinyin_first);
 
-            -- 2. FTS5 全文检索引擎与同步触发器
+            -- 2. FTS5 全文检索引擎与同步触发器 (全文检索对截断后的 fts_content 建立索引)
             CREATE VIRTUAL TABLE IF NOT EXISTS clipboard_entries_fts USING fts5(
-                content,
+                fts_content,
                 pinyin_first,
                 pinyin_full,
                 content='clipboard_entries',
@@ -65,20 +66,20 @@ impl SqliteStorage {
             );
 
             CREATE TRIGGER IF NOT EXISTS trg_entries_ai AFTER INSERT ON clipboard_entries BEGIN
-                INSERT INTO clipboard_entries_fts(rowid, content, pinyin_first, pinyin_full)
-                VALUES (new.id, new.content, new.pinyin_first, new.pinyin_full);
+                INSERT INTO clipboard_entries_fts(rowid, fts_content, pinyin_first, pinyin_full)
+                VALUES (new.id, new.fts_content, new.pinyin_first, new.pinyin_full);
             END;
 
             CREATE TRIGGER IF NOT EXISTS trg_entries_ad AFTER DELETE ON clipboard_entries BEGIN
-                INSERT INTO clipboard_entries_fts(clipboard_entries_fts, rowid, content, pinyin_first, pinyin_full)
-                VALUES ('delete', old.id, old.content, old.pinyin_first, old.pinyin_full);
+                INSERT INTO clipboard_entries_fts(clipboard_entries_fts, rowid, fts_content, pinyin_first, pinyin_full)
+                VALUES ('delete', old.id, old.fts_content, old.pinyin_first, old.pinyin_full);
             END;
 
             CREATE TRIGGER IF NOT EXISTS trg_entries_au AFTER UPDATE ON clipboard_entries BEGIN
-                INSERT INTO clipboard_entries_fts(clipboard_entries_fts, rowid, content, pinyin_first, pinyin_full)
-                VALUES ('delete', old.id, old.content, old.pinyin_first, old.pinyin_full);
-                INSERT INTO clipboard_entries_fts(rowid, content, pinyin_first, pinyin_full)
-                VALUES (new.id, new.content, new.pinyin_first, new.pinyin_full);
+                INSERT INTO clipboard_entries_fts(clipboard_entries_fts, rowid, fts_content, pinyin_first, pinyin_full)
+                VALUES ('delete', old.id, old.fts_content, old.pinyin_first, old.pinyin_full);
+                INSERT INTO clipboard_entries_fts(rowid, fts_content, pinyin_first, pinyin_full)
+                VALUES (new.id, new.fts_content, new.pinyin_first, new.pinyin_full);
             END;
             "#,
         )
@@ -91,6 +92,7 @@ impl Storage for SqliteStorage {
     fn insert_text(
         &self,
         text: &str,
+        fts_content: &str,
         pinyin_first: &str,
         pinyin_full: &str,
     ) -> Result<ClipboardEntry, StorageError> {
@@ -101,8 +103,8 @@ impl Storage for SqliteStorage {
 
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO clipboard_entries (content, entry_type, pinyin_first, pinyin_full, created_at, is_pinned) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![text, "text", pinyin_first, pinyin_full, now_ms, 0],
+            "INSERT INTO clipboard_entries (content, entry_type, fts_content, pinyin_first, pinyin_full, created_at, is_pinned) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![text, "text", fts_content, pinyin_first, pinyin_full, now_ms, 0],
         )
         .map_err(|e| StorageError::DatabaseError(format!("写入剪贴板条目失败: {e}")))?;
 
@@ -121,7 +123,7 @@ impl Storage for SqliteStorage {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
             .prepare(
-                "SELECT id, content, entry_type, created_at, is_pinned FROM clipboard_entries ORDER BY created_at DESC, id DESC LIMIT ?1",
+                "SELECT id, content, entry_type, created_at, is_pinned FROM clipboard_entries ORDER BY is_pinned DESC, created_at DESC, id DESC LIMIT ?1",
             )
             .map_err(|e| StorageError::DatabaseError(format!("预编译查询失败: {e}")))?;
 
@@ -164,13 +166,13 @@ impl Storage for SqliteStorage {
             return self.get_recent_entries(limit);
         }
 
-        // 1. 动态构造多关键词 AND 匹配 SQL，同时支持内容原字与拼音简拼/全拼检索
+        // 1. 动态构造多关键词 AND 匹配 SQL，统一按置顶优先排序展示
         let mut conditions = Vec::with_capacity(words.len());
         let mut sql_params: Vec<String> = Vec::with_capacity(words.len() * 3);
 
         for word in &words {
             let pattern = format!("%{}%", word.to_lowercase());
-            conditions.push("(lower(content) LIKE ? OR lower(pinyin_first) LIKE ? OR lower(pinyin_full) LIKE ?)");
+            conditions.push("(lower(fts_content) LIKE ? OR lower(pinyin_first) LIKE ? OR lower(pinyin_full) LIKE ?)");
             sql_params.push(pattern.clone());
             sql_params.push(pattern.clone());
             sql_params.push(pattern);
@@ -178,7 +180,7 @@ impl Storage for SqliteStorage {
 
         let where_clause = conditions.join(" AND ");
         let sql = format!(
-            "SELECT id, content, entry_type, created_at, is_pinned FROM clipboard_entries WHERE {} ORDER BY created_at DESC, id DESC LIMIT {}",
+            "SELECT id, content, entry_type, created_at, is_pinned FROM clipboard_entries WHERE {} ORDER BY is_pinned DESC, created_at DESC, id DESC LIMIT {}",
             where_clause, limit
         );
 
@@ -201,6 +203,95 @@ impl Storage for SqliteStorage {
 
         Ok(entries)
     }
+
+    fn toggle_pin(&self, id: i64) -> Result<bool, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let affected = conn
+            .execute(
+                "UPDATE clipboard_entries SET is_pinned = 1 - is_pinned WHERE id = ?1",
+                params![id],
+            )
+            .map_err(|e| StorageError::DatabaseError(format!("更新置顶状态失败: {e}")))?;
+
+        if affected == 0 {
+            return Err(StorageError::NotFound(id));
+        }
+
+        let is_pinned: i64 = conn
+            .query_row(
+                "SELECT is_pinned FROM clipboard_entries WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .map_err(|e| StorageError::DatabaseError(format!("查询最新置顶状态失败: {e}")))?;
+
+        Ok(is_pinned != 0)
+    }
+
+    fn find_by_content(&self, text: &str) -> Result<Option<ClipboardEntry>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, content, entry_type, created_at, is_pinned FROM clipboard_entries WHERE content = ?1 LIMIT 1",
+            )
+            .map_err(|e| StorageError::DatabaseError(format!("预编译按内容查询失败: {e}")))?;
+
+        let mut rows = stmt
+            .query_map(params![text], parse_entry_row)
+            .map_err(|e| StorageError::DatabaseError(format!("执行内容匹配失败: {e}")))?;
+
+        if let Some(row) = rows.next() {
+            let entry = row.map_err(|e| StorageError::DatabaseError(format!("解析条目失败: {e}")))?;
+            Ok(Some(entry))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn bump_to_top(&self, id: i64) -> Result<ClipboardEntry, StorageError> {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+
+        {
+            let conn = self.conn.lock().unwrap();
+            let affected = conn
+                .execute(
+                    "UPDATE clipboard_entries SET created_at = ?1 WHERE id = ?2",
+                    params![now_ms, id],
+                )
+                .map_err(|e| StorageError::DatabaseError(format!("执行 Bump-to-Top 失败: {e}")))?;
+
+            if affected == 0 {
+                return Err(StorageError::NotFound(id));
+            }
+        }
+
+        // 复用公共查询方法，消除重复样板代码
+        self.get_entry_by_id(id)?
+            .ok_or(StorageError::NotFound(id))
+    }
+
+    fn prune_lru(&self, max_capacity: usize) -> Result<usize, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let affected = conn
+            .execute(
+                r#"
+                DELETE FROM clipboard_entries
+                WHERE is_pinned = 0 AND id NOT IN (
+                    SELECT id FROM clipboard_entries
+                    WHERE is_pinned = 0
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT ?1
+                )
+                "#,
+                params![max_capacity as i64],
+            )
+            .map_err(|e| StorageError::DatabaseError(format!("执行 LRU 容量淘汰失败: {e}")))?;
+
+        Ok(affected)
+    }
 }
 
 /// 解析 SQLite 数据行为剪贴板实体对象
@@ -219,55 +310,102 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_sqlite_storage_empty_returns_empty_list() {
+    fn test_sqlite_bump_to_top() {
         let storage = SqliteStorage::new_in_memory().unwrap();
-        let entries = storage.get_recent_entries(10).unwrap();
-        assert!(entries.is_empty(), "查询空集合时必须返回空数组");
+        let first = storage.insert_text("First Clip", "First Clip", "first", "first").unwrap();
+        let _second = storage.insert_text("Second Clip", "Second Clip", "second", "second").unwrap();
+
+        // 原本 Second 处于最前
+        let list1 = storage.get_recent_entries(10).unwrap();
+        assert_eq!(list1[0].content, "Second Clip");
+        assert_eq!(list1[1].content, "First Clip");
+
+        // 执行 Bump-to-Top，刷新 First 的时间戳
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let bumped = storage.bump_to_top(first.id).unwrap();
+        assert_eq!(bumped.id, first.id);
+
+        let list2 = storage.get_recent_entries(10).unwrap();
+        assert_eq!(list2[0].content, "First Clip");
+        assert_eq!(list2[1].content, "Second Clip");
     }
 
     #[test]
-    fn test_sqlite_storage_insert_and_get_recent() {
+    fn test_sqlite_toggle_pin() {
         let storage = SqliteStorage::new_in_memory().unwrap();
-        let entry1 = storage.insert_text("First Clip", "first clip", "first clip").unwrap();
-        assert_eq!(entry1.content, "First Clip");
-        assert_eq!(entry1.entry_type, "text");
-        assert!(!entry1.is_pinned);
+        let entry1 = storage.insert_text("Regular Item", "Regular Item", "reg", "reg").unwrap();
+        let entry2 = storage.insert_text("Important Item", "Important Item", "imp", "imp").unwrap();
 
-        let entry2 = storage.insert_text("Second Clip", "second clip", "second clip").unwrap();
-        assert_eq!(entry2.content, "Second Clip");
+        // 默认 entry2 在最前
+        let list1 = storage.get_recent_entries(10).unwrap();
+        assert_eq!(list1[0].id, entry2.id);
 
-        let entries = storage.get_recent_entries(10).unwrap();
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].content, "Second Clip");
-        assert_eq!(entries[1].content, "First Clip");
+        // 将老项 entry1 置顶
+        let is_pinned = storage.toggle_pin(entry1.id).unwrap();
+        assert!(is_pinned);
+
+        // 置顶后 entry1 强制跃升至首位
+        let list2 = storage.get_recent_entries(10).unwrap();
+        assert_eq!(list2[0].id, entry1.id);
+        assert!(list2[0].is_pinned);
+
+        // 取消置顶
+        let unpinned = storage.toggle_pin(entry1.id).unwrap();
+        assert!(!unpinned);
+    }
+
+    #[test]
+    fn test_sqlite_lru_prune_exempts_pinned() {
+        let storage = SqliteStorage::new_in_memory().unwrap();
+        let pinned = storage.insert_text("Very Important (Pinned)", "vip", "vip", "vip").unwrap();
+        storage.toggle_pin(pinned.id).unwrap();
+
+        // 插入 5 条普通记录
+        for i in 1..=5 {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            storage.insert_text(&format!("Item {i}"), &format!("Item {i}"), "item", "item").unwrap();
+        }
+
+        // 总共 6 条 (1 置顶 + 5 普通)。LRU 设置非置顶上限为 2
+        let pruned = storage.prune_lru(2).unwrap();
+        assert_eq!(pruned, 3, "应该淘汰 3 条最早的非置顶记录");
+
+        let remaining = storage.get_recent_entries(10).unwrap();
+        assert_eq!(remaining.len(), 3);
+        // 置顶项永久保留在最前
+        assert_eq!(remaining[0].id, pinned.id);
+        assert!(remaining[0].is_pinned);
+        // 剩下的 2 条为最新的普通项
+        assert_eq!(remaining[1].content, "Item 5");
+        assert_eq!(remaining[2].content, "Item 4");
     }
 
     #[test]
     fn test_sqlite_fts5_triggers_synchronization() {
         let storage = SqliteStorage::new_in_memory().unwrap();
-        let entry = storage.insert_text("银行卡号 622202", "yhk", "yinhangka").unwrap();
+        let entry = storage.insert_text("银行卡号 622202", "银行卡号 622202", "yhk", "yinhangka").unwrap();
 
         // 验证 FTS5 虚拟表通过 AFTER INSERT 触发器自动同步记录
         let conn = storage.conn.lock().unwrap();
         let mut stmt = conn
-            .prepare("SELECT rowid, content, pinyin_first FROM clipboard_entries_fts WHERE rowid = ?1")
+            .prepare("SELECT rowid, fts_content, pinyin_first FROM clipboard_entries_fts WHERE rowid = ?1")
             .unwrap();
         let mut rows = stmt.query(params![entry.id]).unwrap();
         let fts_row = rows.next().unwrap();
         assert!(fts_row.is_some(), "FTS5 触发器必须同步新增记录");
         let row = fts_row.unwrap();
         let rowid: i64 = row.get(0).unwrap();
-        let content: String = row.get(1).unwrap();
+        let fts_content: String = row.get(1).unwrap();
         assert_eq!(rowid, entry.id);
-        assert_eq!(content, "银行卡号 622202");
+        assert_eq!(fts_content, "银行卡号 622202");
     }
 
     #[test]
     fn test_sqlite_search_by_pinyin_first_and_full() {
         let storage = SqliteStorage::new_in_memory().unwrap();
-        storage.insert_text("银行卡", "yhk yxk", "yinhangka yinxingka").unwrap();
-        storage.insert_text("身份证", "sfz", "shenfenzheng").unwrap();
-        storage.insert_text("微信公众号", "wxgzh", "weixingongzhonghao").unwrap();
+        storage.insert_text("银行卡", "银行卡", "yhk yxk", "yinhangka yinxingka").unwrap();
+        storage.insert_text("身份证", "身份证", "sfz", "shenfenzheng").unwrap();
+        storage.insert_text("微信公众号", "微信公众号", "wxgzh", "weixingongzhonghao").unwrap();
 
         // 简拼检索 "yhk" -> 命中 "银行卡"
         let res = storage.search_entries("yhk", 10).unwrap();
@@ -283,9 +421,9 @@ mod tests {
     #[test]
     fn test_sqlite_search_multi_words_and() {
         let storage = SqliteStorage::new_in_memory().unwrap();
-        storage.insert_text("2026年微信API接口规范", "2026nwxapijk", "2026nianweixinapijiekou").unwrap();
-        storage.insert_text("2026年年度财务报告", "2026nndcwbg", "2026niannianducaiwubaogao").unwrap();
-        storage.insert_text("API设计指导原则", "apisj zdyz", "apishejizhidaoyuanze").unwrap();
+        storage.insert_text("2026年微信API接口规范", "2026年微信API接口规范", "2026nwxapijk", "2026nianweixinapijiekou").unwrap();
+        storage.insert_text("2026年年度财务报告", "2026年年度财务报告", "2026nndcwbg", "2026niannianducaiwubaogao").unwrap();
+        storage.insert_text("API设计指导原则", "API设计指导原则", "apisj zdyz", "apishejizhidaoyuanze").unwrap();
 
         // 多词空格分割 AND 匹配: "2026 api" 仅能匹配同时满足的条目
         let res = storage.search_entries("2026 api", 10).unwrap();
