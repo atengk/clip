@@ -22,6 +22,27 @@ interface ClipboardEntry {
   is_pinned: boolean;
 }
 
+/**
+ * 图片多媒体元数据与 Base64 视图模型
+ */
+interface ImageDetail {
+  data_url: string;
+  width: number;
+  height: number;
+  file_size: number;
+}
+
+/**
+ * 文件大小人性化格式化函数
+ */
+function formatBytes(bytes: number): string {
+  if (!bytes || bytes <= 0) return "0 B";
+  const k = 1024;
+  const sizes = ["B", "KB", "MB", "GB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return `${(bytes / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`;
+}
+
 /** 2MB 字节/字符阈值，用于前端展示超大文本标签与长字符串 DOM 裁剪保护 */
 const LARGE_TEXT_THRESHOLD = 2 * 1024 * 1024;
 
@@ -36,7 +57,8 @@ export type ActionKey =
   | "camel_case"
   | "snake_case"
   | "json_prettify"
-  | "json_minify";
+  | "json_minify"
+  | "ocr";
 
 /**
  * 文本清洗与格式转换动作项定义
@@ -60,6 +82,10 @@ const TRANSFORM_ACTIONS: ActionItem[] = [
   { key: "json_minify", label: "JSON 紧凑压缩 (Minify)", description: "去除所有空行与缩进压缩为单行", icon: "📦", hotkey: "8" },
 ];
 
+const IMAGE_ACTIONS: ActionItem[] = [
+  { key: "ocr", label: "提取文字 (OCR)", description: "利用系统原生离线 OCR 识别中英文字符", icon: "🔍", hotkey: "1" },
+];
+
 export const App: React.FC = () => {
   const [query, setQuery] = useState<string>("");
   const [entries, setEntries] = useState<ClipboardEntry[]>([]);
@@ -68,6 +94,10 @@ export const App: React.FC = () => {
   const [actionPaletteOpen, setActionPaletteOpen] = useState<boolean>(false);
   const [actionSelectedIndex, setActionSelectedIndex] = useState<number>(0);
   const [transformError, setTransformError] = useState<string | null>(null);
+  const [imageDetails, setImageDetails] = useState<Record<string, ImageDetail>>({});
+  const [previewModalOpen, setPreviewModalOpen] = useState<boolean>(false);
+  const [ocrTextMap, setOcrTextMap] = useState<Record<number, string>>({});
+  const [ocrLoading, setOcrLoading] = useState<boolean>(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -85,6 +115,16 @@ export const App: React.FC = () => {
       }
       setEntries(history);
       setSelectedIndex(0);
+
+      // 并行批量拉取图片缩略图 Base64 详情并缓存
+      const imageItems = history.filter((item) => item.entry_type === "image");
+      for (const img of imageItems) {
+        invoke<ImageDetail>("get_image_detail", { hash: img.content })
+          .then((detail) => {
+            setImageDetails((prev) => ({ ...prev, [img.content]: detail }));
+          })
+          .catch((err) => console.error("加载图片详情失败:", err));
+      }
     } catch (err) {
       console.error("加载/检索剪贴板历史失败:", err);
     }
@@ -98,10 +138,48 @@ export const App: React.FC = () => {
   const handlePaste = useCallback(async (id: number) => {
     try {
       await invoke("paste_entry", { id });
+      setPreviewModalOpen(false);
     } catch (err) {
       console.error("回填剪贴板条目失败:", err);
     }
   }, []);
+
+  /**
+   * 触发自定义文本（如 OCR 提取文本）的极速回填
+   *
+   * @param text 待回填的目标文本
+   */
+  const handlePasteCustomText = useCallback(async (text: string) => {
+    try {
+      await invoke("paste_custom_text", { text });
+      setPreviewModalOpen(false);
+    } catch (err) {
+      console.error("回填自定义文本失败:", err);
+    }
+  }, []);
+
+  /**
+   * 触发指定图片条目的原生离线 OCR 识别
+   *
+   * @param id 条目唯一主键 ID
+   */
+  const handleOcr = useCallback(async (id: number) => {
+    setOcrLoading(true);
+    setTransformError(null);
+    try {
+      const recognized = await invoke<string>("ocr_image_entry", { id });
+      setOcrTextMap((prev) => ({ ...prev, [id]: recognized }));
+      setPreviewModalOpen(true);
+      fetchEntries(query);
+    } catch (err: unknown) {
+      const msg = typeof err === "string" ? err : "文字提取失败";
+      setTransformError(msg);
+      setTimeout(() => setTransformError(null), 3000);
+    } finally {
+      setOcrLoading(false);
+      setActionPaletteOpen(false);
+    }
+  }, [fetchEntries, query]);
 
   /**
    * 触发指定条目的动作转换与极速回填
@@ -122,6 +200,20 @@ export const App: React.FC = () => {
   }, []);
 
   /**
+   * 统一执行选中的动作项
+   */
+  const executeAction = useCallback(
+    (item: ClipboardEntry, actionKey: ActionKey) => {
+      if (actionKey === "ocr") {
+        handleOcr(item.id);
+      } else {
+        handleTransformAndPaste(item.id, actionKey);
+      }
+    },
+    [handleOcr, handleTransformAndPaste]
+  );
+
+  /**
    * 强制以纯文本格式回填当前条目 (Shift + Enter 专用)
    *
    * @param id 条目唯一主键 ID
@@ -129,6 +221,7 @@ export const App: React.FC = () => {
   const handlePastePlain = useCallback(async (id: number) => {
     try {
       await invoke("paste_plain_entry", { id });
+      setPreviewModalOpen(false);
     } catch (err) {
       console.error("纯文本回填失败:", err);
     }
@@ -159,6 +252,7 @@ export const App: React.FC = () => {
    */
   const handleClose = useCallback(async () => {
     setActionPaletteOpen(false);
+    setPreviewModalOpen(false);
     try {
       await invoke("hide_window");
     } catch (err) {
@@ -188,6 +282,7 @@ export const App: React.FC = () => {
       fetchEntries("");
       setSelectedIndex(0);
       setActionPaletteOpen(false);
+      setPreviewModalOpen(false);
       setTimeout(() => {
         inputRef.current?.focus();
         inputRef.current?.select();
@@ -215,8 +310,30 @@ export const App: React.FC = () => {
         return;
       }
 
-      // 2. Action Palette 处于激活态时的键盘路由
+      // 2. 大图放大预览模态框开启时的键盘路由
+      if (previewModalOpen) {
+        if (e.key === "Escape" || e.key === " ") {
+          e.preventDefault();
+          setPreviewModalOpen(false);
+          return;
+        }
+        if (e.key === "Enter") {
+          e.preventDefault();
+          const current = entries[selectedIndex];
+          if (current) {
+            handlePaste(current.id);
+          }
+          return;
+        }
+        e.preventDefault();
+        return;
+      }
+
+      // 3. Action Palette 处于激活态时的键盘路由
       if (actionPaletteOpen) {
+        const current = entries[selectedIndex];
+        const activeActions = current?.entry_type === "image" ? IMAGE_ACTIONS : TRANSFORM_ACTIONS;
+
         if (e.key === "Escape" || (e.ctrlKey && (e.key === "k" || e.key === "K")) || e.key === "Tab") {
           e.preventDefault();
           setActionPaletteOpen(false);
@@ -225,34 +342,32 @@ export const App: React.FC = () => {
 
         if (e.key === "ArrowDown") {
           e.preventDefault();
-          setActionSelectedIndex((prev) => (prev < TRANSFORM_ACTIONS.length - 1 ? prev + 1 : 0));
+          setActionSelectedIndex((prev) => (prev < activeActions.length - 1 ? prev + 1 : 0));
           return;
         }
 
         if (e.key === "ArrowUp") {
           e.preventDefault();
-          setActionSelectedIndex((prev) => (prev > 0 ? prev - 1 : TRANSFORM_ACTIONS.length - 1));
+          setActionSelectedIndex((prev) => (prev > 0 ? prev - 1 : activeActions.length - 1));
           return;
         }
 
         if (e.key === "Enter") {
           e.preventDefault();
-          const current = entries[selectedIndex];
-          const action = TRANSFORM_ACTIONS[actionSelectedIndex];
+          const action = activeActions[actionSelectedIndex];
           if (current && action) {
-            handleTransformAndPaste(current.id, action.key);
+            executeAction(current, action.key);
           }
           return;
         }
 
         // 数字键快捷触发对应动作 (1~8)
-        if (e.key >= "1" && e.key <= "8") {
+        if (e.key >= "1" && e.key <= String(activeActions.length)) {
           const actionIdx = parseInt(e.key, 10) - 1;
-          const current = entries[selectedIndex];
-          const action = TRANSFORM_ACTIONS[actionIdx];
+          const action = activeActions[actionIdx];
           if (current && action) {
             e.preventDefault();
-            handleTransformAndPaste(current.id, action.key);
+            executeAction(current, action.key);
             return;
           }
         }
@@ -263,7 +378,7 @@ export const App: React.FC = () => {
         return;
       }
 
-      // 3. 主列表状态下的按键调度
+      // 4. 主列表状态下的按键调度
       // Esc: 瞬间无感自隐并释放焦点
       if (e.key === "Escape") {
         e.preventDefault();
@@ -279,6 +394,17 @@ export const App: React.FC = () => {
           setActionPaletteOpen(true);
         }
         return;
+      }
+
+      // Space 或 Alt+Space: 图片大图放大预览
+      const isSpaceTrigger = (e.key === " " && (document.activeElement !== inputRef.current || query.length === 0)) || (e.altKey && e.key === " ");
+      if (isSpaceTrigger) {
+        const current = entries[selectedIndex];
+        if (current && current.entry_type === "image") {
+          e.preventDefault();
+          setPreviewModalOpen(true);
+          return;
+        }
       }
 
       // Shift + Enter: 强制纯文本格式极速回填
@@ -342,12 +468,14 @@ export const App: React.FC = () => {
     query,
     actionPaletteOpen,
     actionSelectedIndex,
+    previewModalOpen,
     fetchEntries,
     handleClose,
     handlePaste,
     handlePastePlain,
     handleTransformAndPaste,
     handleTogglePin,
+    handleOcr,
   ]);
 
   return (
@@ -367,7 +495,7 @@ export const App: React.FC = () => {
         </div>
         <div className="shortcut-hints">
           <span className="hint-tag"><kbd>Tab</kbd> / <kbd>Ctrl+K</kbd> 动作</span>
-          <span className="hint-tag"><kbd>Shift+↵</kbd> 纯文本</span>
+          <span className="hint-tag"><kbd>Space</kbd> 大图预览</span>
           <span className="hint-tag"><kbd>1~9</kbd> 回填</span>
           <span className="hint-tag"><kbd>Alt+P</kbd> 置顶</span>
           <span className="hint-tag"><kbd>Esc</kbd> 自隐</span>
@@ -379,13 +507,96 @@ export const App: React.FC = () => {
           <div className="empty-state">
             <p>{query ? "未找到匹配条目" : "暂无剪贴板历史记录"}</p>
             <span className="empty-sub">
-              {query ? "尝试更换拼音首字母简拼或模糊关键词" : "复制任意文本后将自动捕获并在此显示"}
+              {query ? "尝试更换拼音首字母简拼或模糊关键词" : "复制任意文本或截屏图片后将自动捕获并在此显示"}
             </span>
           </div>
         ) : (
           entries.map((item, index) => {
             const isSelected = index === selectedIndex;
             const fastPasteIndex = index < 9 ? index + 1 : null;
+
+            if (item.entry_type === "image") {
+              const imgDetail = imageDetails[item.content];
+              const ocrText = ocrTextMap[item.id];
+              return (
+                <div
+                  key={item.id}
+                  className={`panel-item image-item ${isSelected ? "selected" : ""} ${item.is_pinned ? "pinned" : ""}`}
+                  onClick={() => handlePaste(item.id)}
+                  onMouseEnter={() => {
+                    setSelectedIndex(index);
+                    setHoveredIndex(index);
+                  }}
+                  onMouseLeave={() => {
+                    if (hoveredIndex === index) {
+                      setHoveredIndex(null);
+                    }
+                  }}
+                >
+                  <div className="item-badge">
+                    {item.is_pinned ? (
+                      <span className="badge-pin" title="置顶条目">📌</span>
+                    ) : fastPasteIndex ? (
+                      <span className="badge-num">{fastPasteIndex}</span>
+                    ) : (
+                      <span className="badge-dot">•</span>
+                    )}
+                  </div>
+                  <div className="item-image-wrapper">
+                    {imgDetail ? (
+                      <img
+                        src={imgDetail.data_url}
+                        alt="缩略图"
+                        className="item-thumbnail"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setSelectedIndex(index);
+                          setPreviewModalOpen(true);
+                        }}
+                        title="点击或按空格放大预览"
+                      />
+                    ) : (
+                      <div className="item-thumbnail placeholder">🖼️</div>
+                    )}
+                    <div className="item-image-meta">
+                      <div className="item-image-title">
+                        <span className="tag-image">🖼️ 图片</span>
+                        {ocrText && <span className="tag-ocr">OCR 提取</span>}
+                        <span>{imgDetail ? `${imgDetail.width} × ${imgDetail.height}` : "位图数据"}</span>
+                      </div>
+                      <div className="item-image-dims">
+                        {ocrText ? `提取文本: ${ocrText.slice(0, 36)}...` : `哈希: ${item.content.slice(0, 16)}... (按空格大图预览)`}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="item-meta">
+                    <button
+                      className="action-btn"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setSelectedIndex(index);
+                        setActionSelectedIndex(0);
+                        setActionPaletteOpen(true);
+                      }}
+                      title="动作面板 (Ctrl+K / Tab)"
+                    >
+                      ⚡
+                    </button>
+                    <button
+                      className={`pin-btn ${item.is_pinned ? "active" : ""}`}
+                      onClick={(e) => handleTogglePin(item.id, e)}
+                      title={item.is_pinned ? "取消置顶" : "置顶条目 (Alt+P)"}
+                    >
+                      {item.is_pinned ? "📌" : "📍"}
+                    </button>
+                    <span className="item-len">
+                      {imgDetail ? formatBytes(imgDetail.file_size) : "图片"}
+                    </span>
+                  </div>
+                </div>
+              );
+            }
+
             const isLargeText = item.content.length > LARGE_TEXT_THRESHOLD;
             const { displayText: maskedText, isSensitive } = maskSensitiveContent(item.content);
             const isHovered = index === hoveredIndex;
@@ -480,18 +691,18 @@ export const App: React.FC = () => {
                 <div className="palette-error">⚠️ {transformError}</div>
               ) : (
                 <div className="palette-sub">
-                  目标条目: {entries[selectedIndex].content.slice(0, 48).replace(/\n/g, " ")}...
+                  目标条目: {entries[selectedIndex].entry_type === "image" ? `[图片] ${entries[selectedIndex].content.slice(0, 32)}...` : `${entries[selectedIndex].content.slice(0, 48).replace(/\n/g, " ")}...`}
                 </div>
               )}
             </div>
             <div className="palette-list">
-              {TRANSFORM_ACTIONS.map((action, idx) => {
+              {(entries[selectedIndex].entry_type === "image" ? IMAGE_ACTIONS : TRANSFORM_ACTIONS).map((action, idx) => {
                 const isActionSelected = idx === actionSelectedIndex;
                 return (
                   <div
                     key={action.key}
                     className={`palette-item ${isActionSelected ? "selected" : ""}`}
-                    onClick={() => handleTransformAndPaste(entries[selectedIndex].id, action.key)}
+                    onClick={() => executeAction(entries[selectedIndex], action.key)}
                     onMouseEnter={() => setActionSelectedIndex(idx)}
                   >
                     <span className="palette-icon">{action.icon}</span>
@@ -509,6 +720,81 @@ export const App: React.FC = () => {
             <div className="palette-footer">
               <span><kbd>↵</kbd> / <kbd>1~8</kbd> 执行并回填</span>
               <span><kbd>Esc</kbd> 取消返回</span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {previewModalOpen && entries[selectedIndex]?.entry_type === "image" && (
+        <div
+          className="image-preview-overlay"
+          onClick={() => setPreviewModalOpen(false)}
+        >
+          <div
+            className="image-preview-modal"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="image-preview-header">
+              <div className="image-preview-title">
+                <span>🖼️ 图片大图放大预览</span>
+              </div>
+              <button
+                className="image-preview-close"
+                onClick={() => setPreviewModalOpen(false)}
+              >
+                ✕
+              </button>
+            </div>
+            <div className="image-preview-body">
+              {imageDetails[entries[selectedIndex].content] && (
+                <img
+                  src={imageDetails[entries[selectedIndex].content].data_url}
+                  alt="大图预览"
+                  className="image-preview-img"
+                />
+              )}
+              {ocrTextMap[entries[selectedIndex].id] && (
+                <div className="ocr-result-container">
+                  <div className="ocr-header">
+                    <span>🔍 离线 OCR 提取文本：</span>
+                    <button
+                      className="preview-action-btn"
+                      onClick={() => handlePasteCustomText(ocrTextMap[entries[selectedIndex].id])}
+                      title="粘贴提取文本"
+                    >
+                      📄 回填文本
+                    </button>
+                  </div>
+                  <div className="ocr-text-view">
+                    {ocrTextMap[entries[selectedIndex].id]}
+                  </div>
+                </div>
+              )}
+            </div>
+            <div className="image-preview-footer">
+              <div className="image-preview-info">
+                {imageDetails[entries[selectedIndex].content] && (
+                  <>
+                    <span>尺寸: {imageDetails[entries[selectedIndex].content].width} × {imageDetails[entries[selectedIndex].content].height} 像素</span>
+                    <span>大小: {formatBytes(imageDetails[entries[selectedIndex].content].file_size)}</span>
+                  </>
+                )}
+              </div>
+              <div className="image-preview-actions">
+                <button
+                  className="preview-action-btn"
+                  onClick={() => handleOcr(entries[selectedIndex].id)}
+                  disabled={ocrLoading}
+                >
+                  {ocrLoading ? "⏳ 识别中..." : "🔍 提取文字 (OCR)"}
+                </button>
+                <button
+                  className="preview-action-btn primary"
+                  onClick={() => handlePaste(entries[selectedIndex].id)}
+                >
+                  ↵ 极速回填图片
+                </button>
+              </div>
             </div>
           </div>
         </div>

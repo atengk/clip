@@ -10,6 +10,9 @@ use std::sync::{Arc, Mutex};
 /// 内存测试桩平台驱动
 pub struct MockPlatformDriver {
     clipboard_text: Mutex<Option<String>>,
+    clipboard_image: Mutex<Option<Vec<u8>>>,
+    last_written_image: Mutex<Option<Vec<u8>>>,
+    ocr_result: Mutex<Option<String>>,
     paste_count: AtomicUsize,
     monitor_callback: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     is_ignored: AtomicBool,
@@ -21,6 +24,9 @@ impl MockPlatformDriver {
     pub fn new() -> Self {
         Self {
             clipboard_text: Mutex::new(None),
+            clipboard_image: Mutex::new(None),
+            last_written_image: Mutex::new(None),
+            ocr_result: Mutex::new(None),
             paste_count: AtomicUsize::new(0),
             monitor_callback: Mutex::new(None),
             is_ignored: AtomicBool::new(false),
@@ -44,11 +50,37 @@ impl MockPlatformDriver {
         *guard = process.map(|s| s.to_string());
     }
 
+    /// 模拟设置 OCR 识别输出
+    pub fn simulate_ocr_result(&self, text: Option<&str>) {
+        let mut guard = self.ocr_result.lock().unwrap();
+        *guard = text.map(|s| s.to_string());
+    }
+
+    /// 获取最后一次写入剪贴板的图片数据
+    pub fn last_written_image(&self) -> Option<Vec<u8>> {
+        self.last_written_image.lock().unwrap().clone()
+    }
+
     /// 人工触发剪贴板变更事件，通知已注册的回调函数
     pub fn simulate_clipboard_change(&self, new_text: Option<String>) {
         {
             let mut text_guard = self.clipboard_text.lock().unwrap();
             *text_guard = new_text;
+        }
+        let cb_opt = {
+            let guard = self.monitor_callback.lock().unwrap();
+            guard.clone()
+        };
+        if let Some(cb) = cb_opt {
+            cb();
+        }
+    }
+
+    /// 模拟设置剪贴板中的图片并触发监听事件
+    pub fn simulate_clipboard_image_change(&self, new_img: Option<Vec<u8>>) {
+        {
+            let mut img_guard = self.clipboard_image.lock().unwrap();
+            *img_guard = new_img;
         }
         let cb_opt = {
             let guard = self.monitor_callback.lock().unwrap();
@@ -96,6 +128,22 @@ impl PlatformDriver for MockPlatformDriver {
     fn get_clipboard_source_process(&self) -> Result<Option<String>, PalError> {
         let guard = self.source_process.lock().unwrap();
         Ok(guard.clone())
+    }
+
+    fn read_image(&self) -> Result<Option<Vec<u8>>, PalError> {
+        let guard = self.clipboard_image.lock().unwrap();
+        Ok(guard.clone())
+    }
+
+    fn write_image(&self, data: &[u8]) -> Result<(), PalError> {
+        let mut guard = self.last_written_image.lock().unwrap();
+        *guard = Some(data.to_vec());
+        Ok(())
+    }
+
+    fn ocr_image(&self, _data: &[u8]) -> Result<String, PalError> {
+        let guard = self.ocr_result.lock().unwrap();
+        Ok(guard.clone().unwrap_or_default())
     }
 }
 
@@ -150,5 +198,22 @@ mod tests {
             driver.read_text().unwrap(),
             Some("Test Content".to_string())
         );
+    }
+
+    #[test]
+    fn test_mock_platform_driver_image_and_ocr() {
+        let driver = Arc::new(MockPlatformDriver::new());
+        assert_eq!(driver.read_image().unwrap(), None);
+
+        let img_bytes = vec![0x42, 0x4D, 0x01, 0x02];
+        driver.simulate_clipboard_image_change(Some(img_bytes.clone()));
+        assert_eq!(driver.read_image().unwrap(), Some(img_bytes.clone()));
+
+        driver.write_image(&img_bytes).unwrap();
+        assert_eq!(driver.last_written_image(), Some(img_bytes));
+
+        driver.simulate_ocr_result(Some("识别文字 2026"));
+        let ocr = driver.ocr_image(b"dummy").unwrap();
+        assert_eq!(ocr, "识别文字 2026");
     }
 }

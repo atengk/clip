@@ -88,6 +88,40 @@ pub trait Storage: Send + Sync {
     /// @return 更新后的条目实体
     fn bump_to_top(&self, id: i64) -> Result<ClipboardEntry, StorageError>;
 
+    /// 插入图片多媒体条目及检索索引
+    ///
+    /// @param blob_name 对应磁盘中的 Blob 文件名
+    /// @param ocr_text 初步 OCR 文本或占位描述
+    /// @param pinyin_first 拼音首字母简拼索引
+    /// @param pinyin_full 拼音全拼索引
+    /// @return 成功返回持久化后的图片条目对象
+    fn insert_image(
+        &self,
+        blob_name: &str,
+        ocr_text: &str,
+        pinyin_first: &str,
+        pinyin_full: &str,
+    ) -> Result<ClipboardEntry, StorageError>;
+
+    /// 更新指定条目的 OCR 提取文本与全文索引
+    ///
+    /// @param id 条目主键 ID
+    /// @param ocr_text 识别得到的文本内容
+    /// @param pinyin_first 拼音首字母简拼索引
+    /// @param pinyin_full 拼音全拼索引
+    fn update_entry_ocr(
+        &self,
+        id: i64,
+        ocr_text: &str,
+        pinyin_first: &str,
+        pinyin_full: &str,
+    ) -> Result<(), StorageError>;
+
+    /// 获取数据库中所有被引用的图片 Blob 文件名列表 (用于 Blob GC 垃圾回收)
+    ///
+    /// @return 数据库当前引用的图片 blob 名称集合
+    fn get_all_image_contents(&self) -> Result<Vec<String>, StorageError>;
+
     /// 执行 LRU 容量淘汰清理，永久豁免置顶条目
     ///
     /// @param max_capacity 非置顶条目最大保留容量 (如 1000)

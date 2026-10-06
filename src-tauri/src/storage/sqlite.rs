@@ -292,6 +292,68 @@ impl Storage for SqliteStorage {
 
         Ok(affected)
     }
+
+    fn insert_image(
+        &self,
+        blob_name: &str,
+        ocr_text: &str,
+        pinyin_first: &str,
+        pinyin_full: &str,
+    ) -> Result<ClipboardEntry, StorageError> {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO clipboard_entries (content, entry_type, fts_content, pinyin_first, pinyin_full, created_at, is_pinned)
+             VALUES (?1, 'image', ?2, ?3, ?4, ?5, 0)",
+            params![blob_name, ocr_text, pinyin_first, pinyin_full, now_ms],
+        )
+        .map_err(|e| StorageError::DatabaseError(format!("插入图片记录失败: {e}")))?;
+
+        let id = conn.last_insert_rowid();
+        Ok(ClipboardEntry {
+            id,
+            content: blob_name.to_string(),
+            entry_type: "image".to_string(),
+            created_at: now_ms,
+            is_pinned: false,
+        })
+    }
+
+    fn update_entry_ocr(
+        &self,
+        id: i64,
+        ocr_text: &str,
+        pinyin_first: &str,
+        pinyin_full: &str,
+    ) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE clipboard_entries
+             SET fts_content = ?1, pinyin_first = ?2, pinyin_full = ?3
+             WHERE id = ?4",
+            params![ocr_text, pinyin_first, pinyin_full, id],
+        )
+        .map_err(|e| StorageError::DatabaseError(format!("更新 OCR 文本失败: {e}")))?;
+        Ok(())
+    }
+
+    fn get_all_image_contents(&self) -> Result<Vec<String>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT content FROM clipboard_entries WHERE entry_type = 'image'")
+            .map_err(|e| StorageError::DatabaseError(format!("准备查询所有图片失败: {e}")))?;
+
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| StorageError::DatabaseError(format!("执行查询所有图片失败: {e}")))?;
+
+        let list = rows.flatten().collect();
+        Ok(list)
+    }
 }
 
 /// 解析 SQLite 数据行为剪贴板实体对象
@@ -429,5 +491,32 @@ mod tests {
         let res = storage.search_entries("2026 api", 10).unwrap();
         assert_eq!(res.len(), 1);
         assert_eq!(res[0].content, "2026年微信API接口规范");
+    }
+
+    #[test]
+    fn test_sqlite_insert_image_and_ocr() {
+        let storage = SqliteStorage::new_in_memory().unwrap();
+        let blob_name = "test_blob_hash_123.png";
+        let entry = storage
+            .insert_image(blob_name, "[图片]", "tp", "tupian")
+            .unwrap();
+
+        assert_eq!(entry.entry_type, "image");
+        assert_eq!(entry.content, blob_name);
+
+        // 验证可查询到被引用的图片 blob
+        let all_blobs = storage.get_all_image_contents().unwrap();
+        assert_eq!(all_blobs, vec![blob_name.to_string()]);
+
+        // 更新 OCR 提取文本
+        storage
+            .update_entry_ocr(entry.id, "发票金额：￥500.00", "fpje", "fapiaojine")
+            .unwrap();
+
+        // 验证全文索引已更新，支持基于 OCR 内容检索到该图片
+        let search_res = storage.search_entries("发票", 10).unwrap();
+        assert_eq!(search_res.len(), 1);
+        assert_eq!(search_res[0].id, entry.id);
+        assert_eq!(search_res[0].entry_type, "image");
     }
 }

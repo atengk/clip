@@ -153,3 +153,56 @@ pub fn hide_window(app: AppHandle) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// 获取指定图片哈希的 Base64 详细数据（含图片尺寸与文件大小）
+///
+/// @param state 全局应用共享状态
+/// @param hash 图片内容 SHA-256 哈希值
+/// @return 包含 Base64 Data URL、尺寸与文件大小的详情模型
+#[tauri::command]
+pub fn get_image_detail(
+    state: State<'_, AppState>,
+    hash: String,
+) -> Result<crate::engine::ImageDetail, String> {
+    state
+        .engine
+        .get_image_detail(&hash)
+        .map_err(|e| format!("获取图片详情失败: {e}"))
+}
+
+/// 对指定图片条目执行原生离线 OCR 文字提取
+///
+/// @param state 全局应用共享状态
+/// @param id 目标条目 ID
+/// @return 提取出的文本内容
+#[tauri::command]
+pub fn ocr_image_entry(
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<String, String> {
+    state
+        .engine
+        .ocr_entry(id)
+        .map_err(|e| format!("文字提取失败: {e}"))
+}
+
+/// 隐藏悬浮面板并将任意文本内容回填至前台原活动窗口（用于 OCR 提取文本回填）
+///
+/// @param app Tauri 应用程序句柄
+/// @param state 全局应用共享状态
+/// @param text 待回填的目标文本
+#[tauri::command]
+pub fn paste_custom_text(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    text: String,
+) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.hide();
+    }
+    thread::sleep(Duration::from_millis(50));
+    state
+        .engine
+        .paste_text(&text)
+        .map_err(|e| format!("执行回填失败: {e}"))
+}

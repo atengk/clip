@@ -9,8 +9,8 @@ pub mod pal;
 pub mod storage;
 
 use crate::commands::clipboard::{
-    get_history, hide_window, paste_entry, paste_plain_entry, search_history, toggle_pin,
-    transform_and_paste_entry,
+    get_history, get_image_detail, hide_window, ocr_image_entry, paste_custom_text, paste_entry,
+    paste_plain_entry, search_history, toggle_pin, transform_and_paste_entry,
 };
 use crate::commands::AppState;
 use crate::engine::ClipboardEngine;
@@ -50,7 +50,13 @@ pub fn run() {
             );
 
             // 3. 构建核心业务引擎
-            let engine = Arc::new(ClipboardEngine::new(driver.clone(), storage));
+            let blob_dir = app_data_dir.join("blobs");
+            fs::create_dir_all(&blob_dir).expect("创建本地图片 Blob 目录失败");
+
+            let engine = Arc::new(
+                ClipboardEngine::new(driver.clone(), storage)
+                    .with_blob_dir(blob_dir),
+            );
             app.manage(AppState {
                 engine: engine.clone(),
             });
@@ -122,7 +128,10 @@ pub fn run() {
             paste_plain_entry,
             transform_and_paste_entry,
             hide_window,
-            toggle_pin
+            toggle_pin,
+            get_image_detail,
+            ocr_image_entry,
+            paste_custom_text
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

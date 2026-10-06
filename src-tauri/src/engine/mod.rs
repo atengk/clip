@@ -5,6 +5,7 @@
 //! @author Ateng
 //! @since 2026-10-06
 
+pub mod hash;
 pub mod pinyin;
 pub mod privacy;
 pub mod transform;
@@ -14,6 +15,7 @@ use crate::engine::privacy::PrivacyFilter;
 use crate::engine::transform::{TextTransformer, TransformAction};
 use crate::pal::{PalError, PlatformDriver};
 use crate::storage::{ClipboardEntry, Storage, StorageError};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use thiserror::Error;
@@ -37,10 +39,21 @@ pub enum EngineError {
     Platform(#[from] PalError),
     #[error("存储引擎异常: {0}")]
     Storage(#[from] StorageError),
+    #[error("文件读写 IO 异常: {0}")]
+    Io(#[from] std::io::Error),
     #[error("目标条目未找到: {0}")]
     EntryNotFound(i64),
     #[error("格式转换失败: {0}")]
     Transform(String),
+}
+
+/// 图片元数据与 Base64 视图模型
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ImageDetail {
+    pub data_url: String,
+    pub width: i32,
+    pub height: i32,
+    pub file_size: u64,
 }
 
 /// 剪贴板状态机核心引擎
@@ -49,8 +62,10 @@ pub struct ClipboardEngine {
     storage: Arc<dyn Storage>,
     last_captured_text: Mutex<Option<String>>,
     paste_suppression: Mutex<Option<(String, Instant)>>,
+    paste_suppression_image: Mutex<Option<(String, Instant)>>,
     max_capacity: usize,
     privacy_filter: PrivacyFilter,
+    blob_dir: PathBuf,
 }
 
 impl ClipboardEngine {
@@ -59,14 +74,28 @@ impl ClipboardEngine {
     /// @param driver 平台抽象驱动实例
     /// @param storage 存储层实例
     pub fn new(driver: Arc<dyn PlatformDriver>, storage: Arc<dyn Storage>) -> Self {
+        let default_blob_dir = std::env::temp_dir().join("clip_blobs");
+        let _ = std::fs::create_dir_all(&default_blob_dir);
         Self {
             driver,
             storage,
             last_captured_text: Mutex::new(None),
             paste_suppression: Mutex::new(None),
+            paste_suppression_image: Mutex::new(None),
             max_capacity: DEFAULT_MAX_CAPACITY,
             privacy_filter: PrivacyFilter::new(),
+            blob_dir: default_blob_dir,
         }
+    }
+
+    /// 设置自定义图片 Blob 存储目录（用于测试隔离或自定义数据目录）
+    ///
+    /// @param blob_dir 图片文件存放根目录
+    /// @return 链式返回 Self
+    pub fn with_blob_dir(mut self, blob_dir: PathBuf) -> Self {
+        let _ = std::fs::create_dir_all(&blob_dir);
+        self.blob_dir = blob_dir;
+        self
     }
 
     /// 设置自定义 LRU 容量上限（用于测试和调优）
@@ -87,6 +116,33 @@ impl ClipboardEngine {
         self
     }
 
+    /// 清理无引用孤立图片文件 (Blob GC)
+    ///
+    /// @return 成功清理的孤立图片文件数量
+    pub fn prune_orphan_blobs(&self) -> Result<usize, EngineError> {
+        let active_blobs: std::collections::HashSet<String> = self
+            .storage
+            .get_all_image_contents()?
+            .into_iter()
+            .collect();
+
+        let mut removed_count = 0;
+        if let Ok(entries) = std::fs::read_dir(&self.blob_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    if let Some(file_name) = path.file_name().and_then(|s| s.to_str()) {
+                        let hash = file_name.strip_suffix(".bmp").unwrap_or(file_name);
+                        if !active_blobs.contains(hash) && std::fs::remove_file(&path).is_ok() {
+                            removed_count += 1;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(removed_count)
+    }
+
     /// 处理剪贴板变更事件
     ///
     /// 包含隐私过滤拦截、防环校验、已有历史 Bump-to-Top、超大文本 Payload Guard 索引熔断及 LRU 淘汰。
@@ -100,13 +156,54 @@ impl ClipboardEngine {
             return Ok(None);
         }
 
-        // 2. 从底层驱动安全读取当前剪贴板文本
+        // 2. 优先检查并读取剪贴板图片二进制数据
+        if let Some(image_data) = self.driver.read_image()? {
+            if !image_data.is_empty() {
+                let hash = hash::sha256_hex(&image_data);
+
+                // 图片回填防环检验 (800ms)
+                {
+                    let mut supp_guard = self.paste_suppression_image.lock().unwrap();
+                    if let Some((ref suppressed_hash, timestamp)) = *supp_guard {
+                        if suppressed_hash == &hash && timestamp.elapsed() < Duration::from_millis(800) {
+                            *supp_guard = None;
+                            return Ok(None);
+                        }
+                    }
+                }
+
+                // 检索已有历史记录执行图片 Bump-to-Top 策略（支持重复复制图片的置顶时间戳刷新）
+                if let Some(existing) = self.storage.find_by_content(&hash)? {
+                    let bumped = self.storage.bump_to_top(existing.id)?;
+                    let _ = self.storage.prune_lru(self.max_capacity);
+                    let _ = self.prune_orphan_blobs();
+                    return Ok(Some(bumped));
+                }
+
+                // 持久化图片 Blob 到磁盘文件
+                let blob_path = self.blob_dir.join(format!("{hash}.bmp"));
+                if !blob_path.exists() {
+                    let _ = std::fs::write(&blob_path, &image_data);
+                }
+
+                // 写入图片元数据
+                let entry = self.storage.insert_image(&hash, "", "", "")?;
+
+                // 触发 LRU 淘汰与孤立 Blob GC
+                let _ = self.storage.prune_lru(self.max_capacity);
+                let _ = self.prune_orphan_blobs();
+
+                return Ok(Some(entry));
+            }
+        }
+
+        // 3. 从底层驱动安全读取当前剪贴板文本
         let current_text = match self.driver.read_text()? {
             Some(t) if !t.trim().is_empty() => t,
             _ => return Ok(None),
         };
 
-        // 3. 回填防环检验：若处于主动回填的 800ms 抑制窗口内且内容匹配，则予以旁路
+        // 4. 回填防环检验：若处于主动回填的 800ms 抑制窗口内且内容匹配，则予以旁路
         {
             let mut suppression_guard = self.paste_suppression.lock().unwrap();
             if let Some((ref text, timestamp)) = *suppression_guard {
@@ -117,10 +214,11 @@ impl ClipboardEngine {
             }
         }
 
-        // 4. 检索已有历史记录执行 Bump-to-Top 策略（支持连续相同文本的置顶时间戳刷新）
+        // 5. 检索已有历史记录执行 Bump-to-Top 策略（支持连续相同文本的置顶时间戳刷新）
         if let Some(existing) = self.storage.find_by_content(&current_text)? {
             let bumped = self.storage.bump_to_top(existing.id)?;
             let _ = self.storage.prune_lru(self.max_capacity);
+            let _ = self.prune_orphan_blobs();
 
             let mut last_guard = self.last_captured_text.lock().unwrap();
             *last_guard = Some(current_text);
@@ -162,8 +260,9 @@ impl ClipboardEngine {
         // 7. 全量持久化原始文本，检索列使用截断索引文本
         let entry = self.storage.insert_text(&current_text, index_text, &pinyin_first, &pinyin_full)?;
 
-        // 8. 触发 LRU 淘汰清理超容记录
+        // 8. 触发 LRU 淘汰清理超容记录并清理孤立图片 Blob
         let _ = self.storage.prune_lru(self.max_capacity);
+        let _ = self.prune_orphan_blobs();
 
         let mut last_guard = self.last_captured_text.lock().unwrap();
         *last_guard = Some(current_text);
@@ -217,7 +316,7 @@ impl ClipboardEngine {
         Ok(())
     }
 
-    /// 触发指定条目的极速回填
+    /// 触发指定条目的极速回填（支持纯文本与位图图片原样回填）
     ///
     /// @param id 目标条目主键 ID
     pub fn paste_entry(&self, id: i64) -> Result<(), EngineError> {
@@ -226,7 +325,95 @@ impl ClipboardEngine {
             .get_entry_by_id(id)?
             .ok_or(EngineError::EntryNotFound(id))?;
 
-        self.paste_text(&entry.content)
+        if entry.entry_type == "image" {
+            // 1. 读取对应图片 Blob 文件
+            let blob_path = self.blob_dir.join(format!("{}.bmp", entry.content));
+            if !blob_path.exists() {
+                return Err(EngineError::Transform("图片 Blob 文件不存在或已被清理".into()));
+            }
+            let data = std::fs::read(&blob_path)?;
+
+            // 2. 注入图片回填防环抑制窗口 (800ms)
+            {
+                let mut suppression_guard = self.paste_suppression_image.lock().unwrap();
+                *suppression_guard = Some((entry.content.clone(), Instant::now()));
+            }
+
+            // 3. 写入系统剪贴板并模拟按键注入
+            self.driver.write_image(&data)?;
+            self.driver.send_paste()?;
+            Ok(())
+        } else {
+            self.paste_text(&entry.content)
+        }
+    }
+
+    /// 对指定图片条目执行离线 OCR 识别并将提取出的文本同步写入数据库索引
+    ///
+    /// @param id 目标图片条目主键 ID
+    /// @return 提取出的文字内容
+    pub fn ocr_entry(&self, id: i64) -> Result<String, EngineError> {
+        let entry = self
+            .storage
+            .get_entry_by_id(id)?
+            .ok_or(EngineError::EntryNotFound(id))?;
+
+        if entry.entry_type != "image" {
+            return Ok(entry.content);
+        }
+
+        // 1. 读取对应位图数据
+        let blob_path = self.blob_dir.join(format!("{}.bmp", entry.content));
+        if !blob_path.exists() {
+            return Err(EngineError::Transform("图片 Blob 文件不存在".into()));
+        }
+        let data = std::fs::read(&blob_path)?;
+
+        // 2. 调用平台抽象驱动原生 OCR 提取
+        let ocr_text = self.driver.ocr_image(&data)?;
+
+        // 3. 计算拼音首字母简拼与全拼索引并更新数据库
+        let pinyin_first = PinyinMatcher::to_first_letters_index(&ocr_text);
+        let pinyin_full = PinyinMatcher::to_full_pinyin_index(&ocr_text);
+        self.storage
+            .update_entry_ocr(id, &ocr_text, &pinyin_first, &pinyin_full)?;
+        Ok(ocr_text)
+    }
+
+    /// 读取指定哈希的图片 Blob 并转为前端可直接渲染的 Base64 Data URI
+    ///
+    /// @param hash 图片内容 SHA-256 哈希值
+    /// @return "data:image/bmp;base64,..." 格式字符串
+    pub fn get_image_base64(&self, hash: &str) -> Result<String, EngineError> {
+        let detail = self.get_image_detail(hash)?;
+        Ok(detail.data_url)
+    }
+
+    /// 读取指定哈希的图片 Blob 详情（包含宽、高、字节大小与 Data URI）
+    ///
+    /// @param hash 图片内容 SHA-256 哈希值
+    /// @return 包含尺寸、字节数与 Base64 编码的 ImageDetail 视图对象
+    pub fn get_image_detail(&self, hash: &str) -> Result<ImageDetail, EngineError> {
+        let blob_path = self.blob_dir.join(format!("{hash}.bmp"));
+        if !blob_path.exists() {
+            return Err(EngineError::Transform("图片 Blob 文件不存在".into()));
+        }
+        let data = std::fs::read(&blob_path)?;
+        let (width, height) = if data.len() >= 26 && &data[0..2] == b"BM" {
+            let w = i32::from_le_bytes(data[18..22].try_into().unwrap_or_default()).abs();
+            let h = i32::from_le_bytes(data[22..26].try_into().unwrap_or_default()).abs();
+            (w, h)
+        } else {
+            (0, 0)
+        };
+        let file_size = data.len() as u64;
+        let encoded = hash::base64_encode(&data);
+        Ok(ImageDetail {
+            data_url: format!("data:image/bmp;base64,{encoded}"),
+            width,
+            height,
+            file_size,
+        })
     }
 
     /// 纯函数转换指定条目内容（仅校验与计算，不触发剪贴板和窗口操作）
@@ -442,5 +629,158 @@ mod tests {
         let current_clipboard_upper = driver.read_text().unwrap().unwrap();
         assert_eq!(current_clipboard_upper, "HELLO_WORLD_VARIABLE");
         assert_eq!(driver.paste_count(), 2);
+    }
+
+    fn create_dummy_bmp(width: i32, height: i32, color_byte: u8) -> Vec<u8> {
+        let mut bmp = Vec::new();
+        bmp.extend_from_slice(b"BM");
+        let file_size: u32 = 54 + (width * height * 3) as u32;
+        bmp.extend_from_slice(&file_size.to_le_bytes());
+        bmp.extend_from_slice(&[0u8; 4]);
+        let offset: u32 = 54;
+        bmp.extend_from_slice(&offset.to_le_bytes());
+        // DIB Header (40 bytes)
+        bmp.extend_from_slice(&40u32.to_le_bytes());
+        bmp.extend_from_slice(&width.to_le_bytes());
+        bmp.extend_from_slice(&height.to_le_bytes());
+        bmp.extend_from_slice(&1u16.to_le_bytes());
+        bmp.extend_from_slice(&24u16.to_le_bytes());
+        bmp.extend_from_slice(&0u32.to_le_bytes());
+        let image_size = (width * height * 3) as u32;
+        bmp.extend_from_slice(&image_size.to_le_bytes());
+        bmp.extend_from_slice(&2835i32.to_le_bytes());
+        bmp.extend_from_slice(&2835i32.to_le_bytes());
+        bmp.extend_from_slice(&0u32.to_le_bytes());
+        bmp.extend_from_slice(&0u32.to_le_bytes());
+        bmp.resize(54 + (width * height * 3) as usize, color_byte);
+        bmp
+    }
+
+    #[test]
+    fn test_engine_image_capture_bump_and_paste() {
+        let driver = Arc::new(MockPlatformDriver::new());
+        let storage = Arc::new(SqliteStorage::new_in_memory().unwrap());
+        let test_blob_dir = std::env::temp_dir().join(format!(
+            "clip_test_blobs_capture_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let engine = Arc::new(
+            ClipboardEngine::new(driver.clone(), storage)
+                .with_blob_dir(test_blob_dir.clone()),
+        );
+
+        // 1. 模拟复制有效图片
+        let bmp = create_dummy_bmp(120, 80, 0xAA);
+        driver.simulate_clipboard_image_change(Some(bmp.clone()));
+        let entry = engine.handle_clipboard_change().unwrap().unwrap();
+
+        assert_eq!(entry.entry_type, "image");
+        let detail = engine.get_image_detail(&entry.content).unwrap();
+        assert_eq!(detail.width, 120);
+        assert_eq!(detail.height, 80);
+        assert_eq!(detail.file_size, bmp.len() as u64);
+
+        // 验证文件已落盘
+        let blob_file = test_blob_dir.join(format!("{}.bmp", entry.content));
+        assert!(blob_file.exists());
+
+        // 验证 Base64 提取
+        let b64 = engine.get_image_base64(&entry.content).unwrap();
+        assert!(b64.starts_with("data:image/bmp;base64,"));
+
+        // 2. 模拟重复复制同一图片，触发 Bump-to-top
+        let bumped = engine.handle_clipboard_change().unwrap().unwrap();
+        assert_eq!(bumped.id, entry.id);
+
+        // 3. 执行图片回填
+        engine.paste_entry(entry.id).unwrap();
+        assert_eq!(driver.last_written_image(), Some(bmp));
+        assert_eq!(driver.paste_count(), 1);
+
+        // 清理测试目录
+        let _ = std::fs::remove_dir_all(&test_blob_dir);
+    }
+
+    #[test]
+    fn test_engine_image_ocr_and_search() {
+        let driver = Arc::new(MockPlatformDriver::new());
+        let storage = Arc::new(SqliteStorage::new_in_memory().unwrap());
+        let test_blob_dir = std::env::temp_dir().join(format!(
+            "clip_test_blobs_ocr_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let engine = Arc::new(
+            ClipboardEngine::new(driver.clone(), storage)
+                .with_blob_dir(test_blob_dir.clone()),
+        );
+
+        // 1. 捕获图片
+        let bmp = create_dummy_bmp(64, 64, 0xBB);
+        driver.simulate_clipboard_image_change(Some(bmp));
+        let entry = engine.handle_clipboard_change().unwrap().unwrap();
+
+        // 2. 模拟原生离线 OCR 识别
+        driver.simulate_ocr_result(Some("重要凭据密码 2026-TOKEN-XYZ"));
+        let ocr_res = engine.ocr_entry(entry.id).unwrap();
+        assert_eq!(ocr_res, "重要凭据密码 2026-TOKEN-XYZ");
+
+        // 3. 通过 OCR 提取的内容进行关键词与拼音检索
+        let search_by_keyword = engine.search_entries("TOKEN-XYZ", 10).unwrap();
+        assert_eq!(search_by_keyword.len(), 1);
+        assert_eq!(search_by_keyword[0].id, entry.id);
+
+        let search_by_pinyin = engine.search_entries("zypj", 10).unwrap();
+        assert_eq!(search_by_pinyin.len(), 1);
+        assert_eq!(search_by_pinyin[0].id, entry.id);
+
+        let _ = std::fs::remove_dir_all(&test_blob_dir);
+    }
+
+    #[test]
+    fn test_engine_image_blob_gc_on_lru() {
+        let driver = Arc::new(MockPlatformDriver::new());
+        let storage = Arc::new(SqliteStorage::new_in_memory().unwrap());
+        let test_blob_dir = std::env::temp_dir().join(format!(
+            "clip_test_blobs_gc_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let engine = Arc::new(
+            ClipboardEngine::new(driver.clone(), storage)
+                .with_capacity(2)
+                .with_blob_dir(test_blob_dir.clone()),
+        );
+
+        // 连续推入 3 张不同图片
+        let bmp1 = create_dummy_bmp(10, 10, 0x01);
+        driver.simulate_clipboard_image_change(Some(bmp1));
+        let entry1 = engine.handle_clipboard_change().unwrap().unwrap();
+
+        let bmp2 = create_dummy_bmp(20, 20, 0x02);
+        driver.simulate_clipboard_image_change(Some(bmp2));
+        let entry2 = engine.handle_clipboard_change().unwrap().unwrap();
+
+        let bmp3 = create_dummy_bmp(30, 30, 0x03);
+        driver.simulate_clipboard_image_change(Some(bmp3));
+        let entry3 = engine.handle_clipboard_change().unwrap().unwrap();
+
+        // entry1 已被淘汰，其对应的 Blob 应该被 GC 清理删除
+        let blob1 = test_blob_dir.join(format!("{}.bmp", entry1.content));
+        let blob2 = test_blob_dir.join(format!("{}.bmp", entry2.content));
+        let blob3 = test_blob_dir.join(format!("{}.bmp", entry3.content));
+
+        assert!(!blob1.exists(), "被淘汰条目的 Blob 文件必须已被 GC 清除");
+        assert!(blob2.exists(), "存活条目的 Blob 文件必须保留");
+        assert!(blob3.exists(), "存活条目的 Blob 文件必须保留");
+
+        let _ = std::fs::remove_dir_all(&test_blob_dir);
     }
 }

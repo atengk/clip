@@ -39,6 +39,9 @@ features = [
     "Win32_System_Memory",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_System_Threading",
+    "Media_Ocr",
+    "Graphics_Imaging",
+    "Storage_Streams",
 ]
 
 

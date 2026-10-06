@@ -31,6 +31,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 /// 标准 Unicode 纯文本剪贴板格式 ID (CF_UNICODETEXT = 13)
 const CF_UNICODETEXT: u32 = 13;
 
+/// 标准设备无关位图剪贴板格式 ID (CF_DIB = 8)
+const CF_DIB: u32 = 8;
+
 /// 线程安全的全局监听回调包装
 static GLOBAL_CALLBACK: RwLock<Option<Arc<dyn Fn() + Send + Sync>>> = RwLock::new(None);
 
@@ -363,6 +366,156 @@ impl PlatformDriver for WindowsPlatformDriver {
             }
 
             Ok(None)
+        }
+    }
+
+    fn read_image(&self) -> Result<Option<Vec<u8>>, PalError> {
+        unsafe {
+            // 1. 安全打开剪贴板
+            open_clipboard_with_retry()?;
+
+            // 2. 检查 CF_DIB 格式是否就绪
+            if IsClipboardFormatAvailable(CF_DIB).is_err() {
+                let _ = CloseClipboard();
+                return Ok(None);
+            }
+
+            // 3. 获取位图句柄并解析 DIB 数据
+            let handle = match GetClipboardData(CF_DIB) {
+                Ok(h) if !h.0.is_null() => h,
+                _ => {
+                    let _ = CloseClipboard();
+                    return Ok(None);
+                }
+            };
+
+            let hglobal = HGLOBAL(handle.0);
+            let ptr = GlobalLock(hglobal);
+            if ptr.is_null() {
+                let _ = CloseClipboard();
+                return Err(PalError::ClipboardError("锁定剪贴板图片内存块失败".into()));
+            }
+
+            let dib_size = windows::Win32::System::Memory::GlobalSize(hglobal);
+            if dib_size < 40 {
+                let _ = GlobalUnlock(hglobal);
+                let _ = CloseClipboard();
+                return Ok(None);
+            }
+
+            let dib_slice = std::slice::from_raw_parts(ptr as *const u8, dib_size);
+
+            // 4. 解析 DIB 信息头计算颜色表偏移
+            let bi_size = u32::from_le_bytes(dib_slice[0..4].try_into().unwrap_or_default());
+            let bi_bit_count = u16::from_le_bytes(dib_slice[14..16].try_into().unwrap_or_default());
+            let bi_compression = u32::from_le_bytes(dib_slice[16..20].try_into().unwrap_or_default());
+            let bi_clr_used = u32::from_le_bytes(dib_slice[32..36].try_into().unwrap_or_default());
+
+            let colors = if bi_clr_used != 0 {
+                bi_clr_used
+            } else if bi_bit_count <= 8 {
+                1 << bi_bit_count
+            } else {
+                0
+            };
+            let masks_size = if bi_compression == 3 && bi_size == 40 { 12 } else { 0 };
+            let offset = 14 + bi_size + (colors * 4) + masks_size;
+
+            // 5. 组装标准 14 字节 BITMAPFILEHEADER
+            let mut bmp_bytes = Vec::with_capacity(14 + dib_size);
+            bmp_bytes.extend_from_slice(b"BM");
+            let total_size = (14 + dib_size) as u32;
+            bmp_bytes.extend_from_slice(&total_size.to_le_bytes());
+            bmp_bytes.extend_from_slice(&[0u8; 4]); // 保留字段
+            bmp_bytes.extend_from_slice(&offset.to_le_bytes());
+            bmp_bytes.extend_from_slice(dib_slice);
+
+            let _ = GlobalUnlock(hglobal);
+            let _ = CloseClipboard();
+
+            Ok(Some(bmp_bytes))
+        }
+    }
+
+    fn write_image(&self, data: &[u8]) -> Result<(), PalError> {
+        if data.is_empty() {
+            return Ok(());
+        }
+
+        // 若传入包含 14 字节 BMP 头，剥离为原生 DIB 字节流以适配 Win32 CF_DIB 规范
+        let dib_payload = if data.len() >= 14 && &data[0..2] == b"BM" {
+            &data[14..]
+        } else {
+            data
+        };
+
+        unsafe {
+            // 1. 分配可移动全局内存
+            let hglobal = match GlobalAlloc(GMEM_MOVEABLE, dib_payload.len()) {
+                Ok(h) if !h.0.is_null() => h,
+                _ => return Err(PalError::ClipboardError("分配剪贴板位图内存失败".into())),
+            };
+
+            let ptr = GlobalLock(hglobal);
+            if ptr.is_null() {
+                return Err(PalError::ClipboardError("锁定剪贴板位图内存失败".into()));
+            }
+
+            std::ptr::copy_nonoverlapping(dib_payload.as_ptr(), ptr as *mut u8, dib_payload.len());
+            let _ = GlobalUnlock(hglobal);
+
+            // 2. 打开并写入剪贴板
+            open_clipboard_with_retry()?;
+
+            if let Err(e) = EmptyClipboard() {
+                let _ = CloseClipboard();
+                return Err(PalError::ClipboardError(format!("清空剪贴板失败: {e}")));
+            }
+
+            if let Err(e) = SetClipboardData(CF_DIB, HANDLE(hglobal.0)) {
+                let _ = CloseClipboard();
+                return Err(PalError::ClipboardError(format!("写入剪贴板位图失败: {e}")));
+            }
+
+            let _ = CloseClipboard();
+            Ok(())
+        }
+    }
+
+    fn ocr_image(&self, data: &[u8]) -> Result<String, PalError> {
+        if data.is_empty() {
+            return Ok(String::new());
+        }
+
+        use windows::Graphics::Imaging::BitmapDecoder;
+        use windows::Media::Ocr::OcrEngine;
+        use windows::Storage::Streams::{DataWriter, InMemoryRandomAccessStream};
+
+        let run_ocr = || -> windows::core::Result<String> {
+            // 1. 尝试初始化当前用户语言环境的 OCR 引擎
+            let engine = OcrEngine::TryCreateFromUserProfileLanguages()?;
+
+            // 2. 写入内存数据流并解码为 SoftwareBitmap
+            let stream = InMemoryRandomAccessStream::new()?;
+            let writer = DataWriter::CreateDataWriter(&stream)?;
+            writer.WriteBytes(data)?;
+            writer.StoreAsync()?.get()?;
+            writer.FlushAsync()?.get()?;
+            stream.Seek(0)?;
+
+            let decoder = BitmapDecoder::CreateAsync(&stream)?.get()?;
+            let bitmap = decoder.GetSoftwareBitmapAsync()?.get()?;
+
+            // 3. 执行原生离线文字识别并获取完整文本
+            let ocr_result = engine.RecognizeAsync(&bitmap)?.get()?;
+            let recognized_text = ocr_result.Text()?.to_string();
+
+            Ok(recognized_text)
+        };
+
+        match run_ocr() {
+            Ok(text) => Ok(text),
+            Err(e) => Err(PalError::InternalError(format!("Windows 原生 OCR 识别失败: {e}"))),
         }
     }
 }

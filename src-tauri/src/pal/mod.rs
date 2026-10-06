@@ -55,5 +55,21 @@ pub trait PlatformDriver: Send + Sync {
     ///
     /// @return 进程名，未知时返回 Ok(None)
     fn get_clipboard_source_process(&self) -> Result<Option<String>, PalError>;
+
+    /// 读取系统剪贴板当前图片二进制数据 (标准 BMP 格式)
+    ///
+    /// @return 若剪贴板无有效图片返回 Ok(None)，成功读取返回 Ok(Some(Vec<u8>))
+    fn read_image(&self) -> Result<Option<Vec<u8>>, PalError>;
+
+    /// 向系统剪贴板写入图片位图
+    ///
+    /// @param data 待写入的图片字节切片 (BMP 格式)
+    fn write_image(&self, data: &[u8]) -> Result<(), PalError>;
+
+    /// 对图片二进制数据执行原生离线 OCR 字符提取
+    ///
+    /// @param data 图片字节切片 (BMP 格式)
+    /// @return 提取出的文本字符串
+    fn ocr_image(&self, data: &[u8]) -> Result<String, PalError>;
 }
 
