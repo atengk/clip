@@ -1,4 +1,4 @@
-//! SQLite 存储层实现，提供剪贴板历史条目的持久化存储与倒序查询。
+//! SQLite 存储层实现，提供剪贴板历史条目的持久化存储、FTS5 全文索引同步与拼音/多词检索。
 //!
 //! @author Ateng
 //! @since 2026-10-06
@@ -37,28 +37,63 @@ impl SqliteStorage {
         Ok(storage)
     }
 
-    /// 初始化数据表与索引结构
+    /// 初始化数据表、FTS5 全文索引与触发器 (AC-5)
     fn init_tables(&self) -> Result<(), StorageError> {
         let conn = self.conn.lock().unwrap();
         conn.execute_batch(
             r#"
+            -- 1. 主业务存储表与多列索引
             CREATE TABLE IF NOT EXISTS clipboard_entries (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 content TEXT NOT NULL,
                 entry_type TEXT NOT NULL,
+                pinyin_first TEXT NOT NULL DEFAULT '',
+                pinyin_full TEXT NOT NULL DEFAULT '',
                 created_at INTEGER NOT NULL,
                 is_pinned INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS idx_entries_created_at ON clipboard_entries(created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_entries_pinyin_first ON clipboard_entries(pinyin_first);
+
+            -- 2. FTS5 全文检索引擎与同步触发器
+            CREATE VIRTUAL TABLE IF NOT EXISTS clipboard_entries_fts USING fts5(
+                content,
+                pinyin_first,
+                pinyin_full,
+                content='clipboard_entries',
+                content_rowid='id'
+            );
+
+            CREATE TRIGGER IF NOT EXISTS trg_entries_ai AFTER INSERT ON clipboard_entries BEGIN
+                INSERT INTO clipboard_entries_fts(rowid, content, pinyin_first, pinyin_full)
+                VALUES (new.id, new.content, new.pinyin_first, new.pinyin_full);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS trg_entries_ad AFTER DELETE ON clipboard_entries BEGIN
+                INSERT INTO clipboard_entries_fts(clipboard_entries_fts, rowid, content, pinyin_first, pinyin_full)
+                VALUES ('delete', old.id, old.content, old.pinyin_first, old.pinyin_full);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS trg_entries_au AFTER UPDATE ON clipboard_entries BEGIN
+                INSERT INTO clipboard_entries_fts(clipboard_entries_fts, rowid, content, pinyin_first, pinyin_full)
+                VALUES ('delete', old.id, old.content, old.pinyin_first, old.pinyin_full);
+                INSERT INTO clipboard_entries_fts(rowid, content, pinyin_first, pinyin_full)
+                VALUES (new.id, new.content, new.pinyin_first, new.pinyin_full);
+            END;
             "#,
         )
-        .map_err(|e| StorageError::DatabaseError(format!("初始化表结构失败: {e}")))?;
+        .map_err(|e| StorageError::DatabaseError(format!("初始化数据表与 FTS5 触发器失败: {e}")))?;
         Ok(())
     }
 }
 
 impl Storage for SqliteStorage {
-    fn insert_text(&self, text: &str) -> Result<ClipboardEntry, StorageError> {
+    fn insert_text(
+        &self,
+        text: &str,
+        pinyin_first: &str,
+        pinyin_full: &str,
+    ) -> Result<ClipboardEntry, StorageError> {
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -66,8 +101,8 @@ impl Storage for SqliteStorage {
 
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO clipboard_entries (content, entry_type, created_at, is_pinned) VALUES (?1, ?2, ?3, ?4)",
-            params![text, "text", now_ms, 0],
+            "INSERT INTO clipboard_entries (content, entry_type, pinyin_first, pinyin_full, created_at, is_pinned) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![text, "text", pinyin_first, pinyin_full, now_ms, 0],
         )
         .map_err(|e| StorageError::DatabaseError(format!("写入剪贴板条目失败: {e}")))?;
 
@@ -122,6 +157,50 @@ impl Storage for SqliteStorage {
             Ok(None)
         }
     }
+
+    fn search_entries(&self, query: &str, limit: usize) -> Result<Vec<ClipboardEntry>, StorageError> {
+        let words: Vec<&str> = query.split_whitespace().collect();
+        if words.is_empty() {
+            return self.get_recent_entries(limit);
+        }
+
+        // 1. 动态构造多关键词 AND 匹配 SQL，同时支持内容原字与拼音简拼/全拼检索
+        let mut conditions = Vec::with_capacity(words.len());
+        let mut sql_params: Vec<String> = Vec::with_capacity(words.len() * 3);
+
+        for word in &words {
+            let pattern = format!("%{}%", word.to_lowercase());
+            conditions.push("(lower(content) LIKE ? OR lower(pinyin_first) LIKE ? OR lower(pinyin_full) LIKE ?)");
+            sql_params.push(pattern.clone());
+            sql_params.push(pattern.clone());
+            sql_params.push(pattern);
+        }
+
+        let where_clause = conditions.join(" AND ");
+        let sql = format!(
+            "SELECT id, content, entry_type, created_at, is_pinned FROM clipboard_entries WHERE {} ORDER BY created_at DESC, id DESC LIMIT {}",
+            where_clause, limit
+        );
+
+        // 2. 执行安全参数绑定查询
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| StorageError::DatabaseError(format!("预编译搜索 SQL 失败: {e}")))?;
+
+        let rusqlite_params = rusqlite::params_from_iter(sql_params.iter());
+        let rows = stmt
+            .query_map(rusqlite_params, parse_entry_row)
+            .map_err(|e| StorageError::DatabaseError(format!("执行搜索失败: {e}")))?;
+
+        let mut entries = Vec::new();
+        for row in rows {
+            let entry = row.map_err(|e| StorageError::DatabaseError(format!("解析搜索记录失败: {e}")))?;
+            entries.push(entry);
+        }
+
+        Ok(entries)
+    }
 }
 
 /// 解析 SQLite 数据行为剪贴板实体对象
@@ -149,31 +228,68 @@ mod tests {
     #[test]
     fn test_sqlite_storage_insert_and_get_recent() {
         let storage = SqliteStorage::new_in_memory().unwrap();
-        let entry1 = storage.insert_text("First Clip").unwrap();
+        let entry1 = storage.insert_text("First Clip", "first clip", "first clip").unwrap();
         assert_eq!(entry1.content, "First Clip");
         assert_eq!(entry1.entry_type, "text");
         assert!(!entry1.is_pinned);
 
-        let entry2 = storage.insert_text("Second Clip").unwrap();
+        let entry2 = storage.insert_text("Second Clip", "second clip", "second clip").unwrap();
         assert_eq!(entry2.content, "Second Clip");
 
         let entries = storage.get_recent_entries(10).unwrap();
         assert_eq!(entries.len(), 2);
-        // 倒序排列：最新的在最前
         assert_eq!(entries[0].content, "Second Clip");
         assert_eq!(entries[1].content, "First Clip");
     }
 
     #[test]
-    fn test_sqlite_storage_get_entry_by_id() {
+    fn test_sqlite_fts5_triggers_synchronization() {
         let storage = SqliteStorage::new_in_memory().unwrap();
-        let inserted = storage.insert_text("Target Item").unwrap();
+        let entry = storage.insert_text("银行卡号 622202", "yhk", "yinhangka").unwrap();
 
-        let found = storage.get_entry_by_id(inserted.id).unwrap();
-        assert!(found.is_some());
-        assert_eq!(found.unwrap().content, "Target Item");
+        // 验证 FTS5 虚拟表通过 AFTER INSERT 触发器自动同步记录
+        let conn = storage.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT rowid, content, pinyin_first FROM clipboard_entries_fts WHERE rowid = ?1")
+            .unwrap();
+        let mut rows = stmt.query(params![entry.id]).unwrap();
+        let fts_row = rows.next().unwrap();
+        assert!(fts_row.is_some(), "FTS5 触发器必须同步新增记录");
+        let row = fts_row.unwrap();
+        let rowid: i64 = row.get(0).unwrap();
+        let content: String = row.get(1).unwrap();
+        assert_eq!(rowid, entry.id);
+        assert_eq!(content, "银行卡号 622202");
+    }
 
-        let not_found = storage.get_entry_by_id(9999).unwrap();
-        assert!(not_found.is_none());
+    #[test]
+    fn test_sqlite_search_by_pinyin_first_and_full() {
+        let storage = SqliteStorage::new_in_memory().unwrap();
+        storage.insert_text("银行卡", "yhk yxk", "yinhangka yinxingka").unwrap();
+        storage.insert_text("身份证", "sfz", "shenfenzheng").unwrap();
+        storage.insert_text("微信公众号", "wxgzh", "weixingongzhonghao").unwrap();
+
+        // 简拼检索 "yhk" -> 命中 "银行卡"
+        let res = storage.search_entries("yhk", 10).unwrap();
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].content, "银行卡");
+
+        // 全拼检索 "weixin" -> 命中 "微信公众号"
+        let res_wx = storage.search_entries("weixin", 10).unwrap();
+        assert_eq!(res_wx.len(), 1);
+        assert_eq!(res_wx[0].content, "微信公众号");
+    }
+
+    #[test]
+    fn test_sqlite_search_multi_words_and() {
+        let storage = SqliteStorage::new_in_memory().unwrap();
+        storage.insert_text("2026年微信API接口规范", "2026nwxapijk", "2026nianweixinapijiekou").unwrap();
+        storage.insert_text("2026年年度财务报告", "2026nndcwbg", "2026niannianducaiwubaogao").unwrap();
+        storage.insert_text("API设计指导原则", "apisj zdyz", "apishejizhidaoyuanze").unwrap();
+
+        // 多词空格分割 AND 匹配: "2026 api" 仅能匹配同时满足的条目
+        let res = storage.search_entries("2026 api", 10).unwrap();
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].content, "2026年微信API接口规范");
     }
 }

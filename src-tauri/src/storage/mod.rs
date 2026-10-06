@@ -36,11 +36,18 @@ pub struct ClipboardEntry {
 
 /// 存储驱动统一契约 (Storage Trait)
 pub trait Storage: Send + Sync {
-    /// 插入纯文本条目
+    /// 插入纯文本条目及检索索引
     ///
     /// @param text 纯文本内容
+    /// @param pinyin_first 拼音首字母简拼索引
+    /// @param pinyin_full 拼音全拼索引
     /// @return 成功返回持久化后的剪贴板条目对象
-    fn insert_text(&self, text: &str) -> Result<ClipboardEntry, StorageError>;
+    fn insert_text(
+        &self,
+        text: &str,
+        pinyin_first: &str,
+        pinyin_full: &str,
+    ) -> Result<ClipboardEntry, StorageError>;
 
     /// 获取最近历史条目列表（按创建时间倒序）
     ///
@@ -53,4 +60,11 @@ pub trait Storage: Send + Sync {
     /// @param id 条目主键 ID
     /// @return 存在返回 Some(ClipboardEntry)，不存在返回 Ok(None)
     fn get_entry_by_id(&self, id: i64) -> Result<Option<ClipboardEntry>, StorageError>;
+
+    /// 基于关键词与拼音进行模糊检索，支持空格分割多词 AND 匹配
+    ///
+    /// @param query 检索关键词（支持中文、拼音简拼/全拼、英文多词）
+    /// @param limit 最大返回条数
+    /// @return 匹配的历史条目列表
+    fn search_entries(&self, query: &str, limit: usize) -> Result<Vec<ClipboardEntry>, StorageError>;
 }

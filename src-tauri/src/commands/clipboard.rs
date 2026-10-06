@@ -26,6 +26,26 @@ pub fn get_history(
         .map_err(|e| format!("获取历史记录失败: {e}"))
 }
 
+/// 基于关键词与拼音模糊检索历史记录
+///
+/// @param state 全局应用共享状态
+/// @param query 搜索词
+/// @param limit 最大返回条数，默认为 50
+/// @return 匹配的历史条目列表
+#[tauri::command]
+pub fn search_history(
+    state: State<'_, AppState>,
+    query: String,
+    limit: Option<usize>,
+) -> Result<Vec<ClipboardEntry>, String> {
+    let limit = limit.unwrap_or(50);
+    state
+        .engine
+        .search_entries(&query, limit)
+        .map_err(|e| format!("检索历史记录失败: {e}"))
+}
+
+
 /// 隐藏悬浮面板并将指定条目回填至前台原活动窗口
 ///
 /// 遵循极速回填契约：先隐藏面板释放焦点，再模拟键入 Ctrl+V。

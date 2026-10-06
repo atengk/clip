@@ -4,6 +4,7 @@
 //!
 //! @author Ateng
 //! @since 2026-10-06
+pub mod pinyin;
 
 use crate::pal::{PalError, PlatformDriver};
 use crate::storage::{ClipboardEntry, Storage, StorageError};
@@ -78,8 +79,10 @@ impl ClipboardEngine {
             *last_guard = Some(current_text.clone());
         }
 
-        // 4. 持久化存储至 SQLite 并返回新实体
-        let entry = self.storage.insert_text(&current_text)?;
+        // 4. 提取拼音首字母与全拼索引并持久化存储至 SQLite
+        let pinyin_first = crate::engine::pinyin::PinyinMatcher::to_first_letters_index(&current_text);
+        let pinyin_full = crate::engine::pinyin::PinyinMatcher::to_full_pinyin_index(&current_text);
+        let entry = self.storage.insert_text(&current_text, &pinyin_first, &pinyin_full)?;
         Ok(Some(entry))
     }
 
@@ -89,6 +92,16 @@ impl ClipboardEngine {
     /// @return 历史条目列表
     pub fn get_entries(&self, limit: usize) -> Result<Vec<ClipboardEntry>, EngineError> {
         let entries = self.storage.get_recent_entries(limit)?;
+        Ok(entries)
+    }
+
+    /// 基于关键词与拼音检索历史剪贴板条目
+    ///
+    /// @param query 搜索词
+    /// @param limit 最大返回条数
+    /// @return 匹配的历史条目列表
+    pub fn search_entries(&self, query: &str, limit: usize) -> Result<Vec<ClipboardEntry>, EngineError> {
+        let entries = self.storage.search_entries(query, limit)?;
         Ok(entries)
     }
 
@@ -177,5 +190,21 @@ mod tests {
             re_captured.is_none(),
             "回填自身写入的数据必须被抑制窗口机制拦截，严禁重复入库"
         );
+    }
+
+    #[test]
+    fn test_engine_search_entries() {
+        let (driver, engine) = setup_engine();
+
+        driver.write_text("密码管理器令牌").unwrap();
+        let _ = engine.handle_clipboard_change().unwrap();
+
+        driver.write_text("银行卡号 622202").unwrap();
+        let _ = engine.handle_clipboard_change().unwrap();
+
+        // 简拼检索
+        let results = engine.search_entries("yhk", 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].content, "银行卡号 622202");
     }
 }

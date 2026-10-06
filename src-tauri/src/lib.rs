@@ -8,7 +8,7 @@ pub mod engine;
 pub mod pal;
 pub mod storage;
 
-use crate::commands::clipboard::{get_history, hide_window, paste_entry};
+use crate::commands::clipboard::{get_history, hide_window, paste_entry, search_history};
 use crate::commands::AppState;
 use crate::engine::ClipboardEngine;
 use crate::pal::PlatformDriver;
@@ -107,8 +107,14 @@ pub fn run() {
 
             Ok(())
         })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::Focused(false) = event {
+                let _ = window.hide();
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             get_history,
+            search_history,
             paste_entry,
             hide_window
         ])

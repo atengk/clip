@@ -1,5 +1,6 @@
 :root {
-  --bg-primary: rgba(28, 28, 30, 0.95);
+  --bg-primary: rgba(28, 28, 30, 0.96);
+  --bg-search: rgba(255, 255, 255, 0.08);
   --bg-item-hover: rgba(255, 255, 255, 0.08);
   --bg-item-active: rgba(10, 132, 255, 0.22);
   --border-color: rgba(255, 255, 255, 0.12);
@@ -35,30 +36,59 @@ body {
   border: 1px solid var(--border-color);
   border-radius: 12px;
   overflow: hidden;
-  backdrop-filter: blur(24px);
-  -webkit-backdrop-filter: blur(24px);
-  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(28px);
+  -webkit-backdrop-filter: blur(28px);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5);
 }
 
 .panel-header {
   display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 10px 14px;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 14px 8px;
   background: rgba(255, 255, 255, 0.03);
   border-bottom: 1px solid var(--border-color);
-  cursor: default;
 }
 
-.brand-title {
+.search-bar {
+  display: flex;
+  align-items: center;
+  background: var(--bg-search);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 6px 10px;
+  gap: 8px;
+  transition: border-color 0.15s ease;
+}
+
+.search-bar:focus-within {
+  border-color: var(--accent-color);
+  box-shadow: 0 0 0 1px var(--accent-color);
+}
+
+.search-icon {
   font-size: 13px;
-  font-weight: 600;
-  letter-spacing: 0.3px;
+  opacity: 0.7;
+}
+
+.search-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
   color: var(--text-main);
+  font-size: 13px;
+  font-family: inherit;
+}
+
+.search-input::placeholder {
+  color: var(--text-muted);
+  font-size: 12px;
 }
 
 .shortcut-hints {
   display: flex;
+  justify-content: flex-end;
   gap: 8px;
 }
 
