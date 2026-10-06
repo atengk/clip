@@ -117,11 +117,12 @@ flowchart TD
 
 本项目遵循严谨的架构决策记录与统一领域模型：
 
-- **统一领域术语字典 (19项规范)**：[CONTEXT.md](./CONTEXT.md)
+- **统一领域术语字典 (22项规范)**：[CONTEXT.md](./CONTEXT.md)
 - **架构决策记录 (ADRs)**：
   - [ADR-0001: 跨平台架构与 Tauri v2 + React + PAL](./docs/adr/0001-cross-platform-architecture-tauri-pal.md)
   - [ADR-0002: 操作系统原生 0MB 体积离线 OCR 引擎](./docs/adr/0002-native-offline-ocr-engine.md)
   - [ADR-0003: 深度集成 atengk/oss-template 开源底座与 CI/CD 自动化发版](./docs/adr/0003-oss-governance-and-ci-cd-automation.md)
+  - [ADR-0004: Rust 单 Crate 模块化分层与无头测试接缝架构](./docs/adr/0004-internal-modular-architecture-and-test-seams.md)
 - **需求规格书与工单规划**：
   - [Issue #1 · [Spec] 剪贴板管理器 (clip) 核心功能与系统架构规格书](https://github.com/atengk/clip/issues/1)
   - [全部垂直切片工单列表 (Issue #2 ~ #10)](https://github.com/atengk/clip/issues)
@@ -149,7 +150,8 @@ flowchart TD
 ### 环境依赖
 - **Node.js**：`v22+`
 - **pnpm**：`11+`
-- **Rust / Cargo**：`1.90+`（支持 `x86_64-pc-windows-msvc`）
+- **Rust / Cargo**：`1.80+`（支持 `x86_64-pc-windows-msvc`）
+- **WebView2 运行时**：Windows 10/11 操作系统原生内置
 
 ### 常用命令
 ```bash
@@ -160,13 +162,18 @@ cd clip
 # 2. 安装前端依赖
 pnpm install
 
-# 3. 本地启动开发环境 (Tauri 热重载)
+# 3. 运行静态代码语法检查
+pnpm lint              # TypeScript 类型检查
+cargo check            # Rust 工作区语法校验
+cargo clippy           # Rust 代码质量与最佳实践检查
+
+# 4. 本地启动开发环境 (Tauri 极速热重载)
 pnpm tauri dev
 
-# 4. 运行 Rust 核心单元测试 (无头接缝测试)
+# 5. 运行 Rust 核心单元测试 (无头接缝测试，毫秒级回归)
 cargo test --lib
 
-# 5. 编译生产安装包 (.msi / .exe)
+# 6. 编译生产安装包 (.msi / .exe)
 pnpm tauri build
 ```
 

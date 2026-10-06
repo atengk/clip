@@ -64,9 +64,11 @@
 1. **环境依赖**：
    - Node.js `22+` / pnpm `11+`
    - Rust `1.90+` / Cargo
-2. **代码检查**：
-   - 提交前请确保运行前端检查：`pnpm lint`
-   - 确保运行 Rust 核心单测：`cargo test --lib`
-3. **领域契约**：
-   - 编码与命名请务必遵循项目 [CONTEXT.md](./CONTEXT.md) 中定义的 19 项统一领域术语；
+2. **代码检查与测试运行**：
+   - 前端代码检查：`pnpm lint`
+   - Rust 工作区语法与质量检查：`cargo check && cargo clippy`
+   - 运行无头核心单元测试（毫秒级验证）：`cargo test --lib`
+3. **领域契约与架构决策**：
+   - 编码与命名请务必遵循项目 [CONTEXT.md](./CONTEXT.md) 中定义的 22 项统一领域术语；
+   - 后端模块划分与测试接缝遵循 [ADR-0004](./docs/adr/0004-internal-modular-architecture-and-test-seams.md)；
    - 架构重大变更请前置审阅与更新 [docs/adr/](./docs/adr/)。
