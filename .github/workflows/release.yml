@@ -10,15 +10,68 @@ permissions:
   contents: write
 
 jobs:
-  tauri-release:
-    name: 自动化发版与产物打包 (Windows)
-    runs-on: windows-latest
+  # ============================================================================
+  # Stage 1: 创建发布草稿并提取语义化变更日志
+  # ============================================================================
+  create-draft-release:
+    name: 生成发布日志并初始化 Draft Release
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.create-draft.outputs.release_id }}
+    steps:
+      - name: 检出源码 (完整历史)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 生成发布日志 (基于 git-cliff)
+        uses: orhun/git-cliff-action@v4
+        id: git-cliff
+        with:
+          config: .cliff.toml
+          args: --latest --strip header
+        env:
+          OUTPUT: CHANGELOG_RELEASE.md
+
+      - name: 创建 GitHub Draft Release
+        id: create-draft
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          IS_PRERELEASE=$([[ "${{ github.ref_name }}" == *"-"* ]] && echo "true" || echo "false")
+          gh release create "${{ github.ref_name }}" \
+            --title "clip ${{ github.ref_name }}" \
+            --notes-file CHANGELOG_RELEASE.md \
+            --draft \
+            --prerelease=$IS_PRERELEASE
+
+          RELEASE_ID=$(gh release view "${{ github.ref_name }}" --json id -q .id)
+          echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
+
+  # ============================================================================
+  # Stage 2: Windows / macOS / Linux 三平台矩阵并发编译与打包挂载
+  # ============================================================================
+  build-tauri:
+    name: 构建跨平台安装包 (${{ matrix.platform }})
+    needs: create-draft-release
+    runs-on: ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: 'windows-latest'
+            target: 'x86_64-pc-windows-msvc'
+            args: ''
+          - platform: 'macos-latest'
+            target: 'aarch64-apple-darwin'
+            args: '--target aarch64-apple-darwin'
+          - platform: 'ubuntu-22.04'
+            target: ''
+            args: ''
 
     steps:
       - name: 检出源码
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: 设置 Node.js 与 pnpm
         uses: pnpm/action-setup@v4
@@ -32,49 +85,62 @@ jobs:
           cache: 'pnpm'
         if: hashFiles('pnpm-lock.yaml') != ''
 
+      - name: 安装前端依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 安装 Linux 系统依赖 (GTK / WebKit / AppIndicator)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+        if: runner.os == 'Linux'
+
       - name: 安装 Rust 工具链
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-pc-windows-msvc
+          targets: ${{ matrix.target }}
 
-      - name: Rust 缓存
+      - name: Rust 构建缓存
         uses: Swatinem/rust-cache@v2
 
-      - name: 生成发布日志 (基于 git-cliff)
-        uses: orhun/git-cliff-action@v4
-        id: git-cliff
-        with:
-          config: .cliff.toml
-          args: --latest --strip header
-        env:
-          OUTPUT: CHANGELOG_RELEASE.md
-
-      - name: 安装前端依赖
-        run: pnpm install
-        if: hashFiles('package.json') != ''
-
-      # ------------------------------------------------------------------------
-      # Tauri 官方全自动编译、打包与 GitHub Release 挂载动作
-      # ------------------------------------------------------------------------
-      - name: 构建 Tauri 安装包并发布到 GitHub Release
+      - name: 构建 Tauri 安装包并上传至 Draft Release
         uses: tauri-apps/tauri-action@v0
-        if: hashFiles('src-tauri/Cargo.toml') != ''
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # macOS 证书可选注入 (无证书时平滑降级为未签名应用)
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: 'clip ${{ github.ref_name }}'
-          releaseBody: ${{ steps.git-cliff.outputs.content }}
-          releaseDraft: false
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          releaseId: ${{ needs.create-draft-release.outputs.release_id }}
+          args: ${{ matrix.args }}
 
-      # 兜底发版步骤：在首期脚手架尚未完全编译前，支持通过基础 Action 发布 Release Notes
-      - name: 备用发版逻辑 (当 src-tauri 尚未初始化时)
-        uses: softprops/action-gh-release@v2
-        if: hashFiles('src-tauri/Cargo.toml') == ''
-        with:
-          body: ${{ steps.git-cliff.outputs.content }}
-          draft: false
-          prerelease: ${{ contains(github.ref_name, '-') }}
+  # ============================================================================
+  # Stage 3: 生成全量产物哈希清单并正式发布 Release
+  # ============================================================================
+  publish-release:
+    name: 聚合校验清单并正式发布 Release
+    needs: [create-draft-release, build-tauri]
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@v4
+
+      - name: 下载 Release 产物并生成 SHA-256 校验和清单
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p release-assets
+          cd release-assets
+          gh release download "${{ github.ref_name }}" --dir .
+          sha256sum * > ../checksums.txt
+          cd ..
+          gh release upload "${{ github.ref_name }}" checksums.txt --clobber
+
+      - name: 将 Draft Release 切换为公开正式发布
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release edit "${{ github.ref_name }}" --draft=false

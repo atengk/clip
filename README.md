@@ -117,12 +117,13 @@ flowchart TD
 
 本项目遵循严谨的架构决策记录与统一领域模型：
 
-- **统一领域术语字典 (22项规范)**：[CONTEXT.md](./CONTEXT.md)
+- **统一领域术语字典 (25项规范)**：[CONTEXT.md](./CONTEXT.md)
 - **架构决策记录 (ADRs)**：
   - [ADR-0001: 跨平台架构与 Tauri v2 + React + PAL](./docs/adr/0001-cross-platform-architecture-tauri-pal.md)
   - [ADR-0002: 操作系统原生 0MB 体积离线 OCR 引擎](./docs/adr/0002-native-offline-ocr-engine.md)
   - [ADR-0003: 深度集成 atengk/oss-template 开源底座与 CI/CD 自动化发版](./docs/adr/0003-oss-governance-and-ci-cd-automation.md)
   - [ADR-0004: Rust 单 Crate 模块化分层与无头测试接缝架构](./docs/adr/0004-internal-modular-architecture-and-test-seams.md)
+  - [ADR-0005: 多平台 CI/CD 矩阵构建与三阶段发布管道架构](./docs/adr/0005-multi-platform-ci-cd-matrix-pipeline.md)
 - **需求规格书与工单规划**：
   - [Issue #1 · [Spec] 剪贴板管理器 (clip) 核心功能与系统架构规格书](https://github.com/atengk/clip/issues/1)
   - [全部垂直切片工单列表 (Issue #2 ~ #10)](https://github.com/atengk/clip/issues)
@@ -179,9 +180,9 @@ pnpm tauri build
 
 ---
 
-## 🚀 版本发布流程 (Release Workflow)
+## 🚀 版本发布流程与多平台产物 (Release Workflow)
 
-本项目遵循 [Conventional Commits](https://www.conventionalcommits.org/zh-hans/) 规范，全自动化发版由 GitHub Actions 驱动：
+本项目遵循 [Conventional Commits](https://www.conventionalcommits.org/zh-hans/) 规范，全自动化发版由 GitHub Actions 三阶段流水线驱动：
 
 ```bash
 # 1. 确保本地主分支代码最新并通过全部测试
@@ -193,11 +194,16 @@ git push origin v1.0.0
 ```
 
 GitHub Actions 将会自动执行 [`.github/workflows/release.yml`](./.github/workflows/release.yml)：
-1. 调用 `git-cliff` 自动提取 Commit 生成分类清晰的 Release Notes；
-2. 自动编译 Windows `.msi` 与 `.exe` 安装包；
-3. 将产物与 `checksums.txt` 安全校验清单挂载至 [GitHub Releases](https://github.com/atengk/clip/releases)。
+1. **Stage 1 (日志与草稿)**：基于 `git-cliff` 提取语义化更新日志，初始化 Draft Release；
+2. **Stage 2 (三平台矩阵并发构建)**：
+   - **Windows**：输出 `.msi` 独立安装器与 `.exe` 安装程序；
+   - **macOS**：输出针对 Apple Silicon 原生优化的 `.dmg` 镜像与 `.app` 归档；
+   - **Linux**：输出针对 Debian/Ubuntu 的 `.deb` 包与免安装 `.AppImage` 镜像；
+3. **Stage 3 (哈希清单与公开上线)**：自动汇总多平台二进制资产的 SHA-256 哈希值写入 `checksums.txt`，并将 Draft Release 切换为公开正式版。
 
----
+> [!TIP]
+> **macOS 首次运行提示**：开源社区构建版本若提示“应用已损坏或无法验证开发者”，在终端运行 `xattr -cr /Applications/clip.app` 即可一键放行正常运行。
+
 
 ## 🤝 参与贡献 (Contributing)
 

@@ -69,6 +69,7 @@
    - Rust 工作区语法与质量检查：`cargo check && cargo clippy`
    - 运行无头核心单元测试（毫秒级验证）：`cargo test --lib`
 3. **领域契约与架构决策**：
-   - 编码与命名请务必遵循项目 [CONTEXT.md](./CONTEXT.md) 中定义的 22 项统一领域术语；
+   - 编码与命名请务必遵循项目 [CONTEXT.md](./CONTEXT.md) 中定义的 25 项统一领域术语；
    - 后端模块划分与测试接缝遵循 [ADR-0004](./docs/adr/0004-internal-modular-architecture-and-test-seams.md)；
+   - 多平台 CI/CD 矩阵与发布规范遵循 [ADR-0005](./docs/adr/0005-multi-platform-ci-cd-matrix-pipeline.md)；
    - 架构重大变更请前置审阅与更新 [docs/adr/](./docs/adr/)。

@@ -95,3 +95,16 @@ _Avoid_: WebSocket 消息, 订阅通知, 消息回调
 **WindowAnchor**:
 剪贴板悬浮面板在快捷键唤出时，基于系统活动窗口当前输入光标或鼠标位置自适应计算展示坐标并确保不超出多屏幕可视边界的智能贴靠策略。
 _Avoid_: 窗口定位, 弹窗位置, 居中弹窗
+
+**MultiPlatformMatrix**:
+覆盖 Windows、macOS 与 Linux 三大主流桌面操作系统的并发构建与环境适配自动化执行矩阵。
+_Avoid_: 多系统构建, 跨平台流水线
+
+**DraftReleaseStage**:
+发布流水线中在各平台构建完成前保持草稿状态、汇总聚合所有平台二进制产物后方对公众发布的发布事务隔离机制。
+_Avoid_: 暂存发布, 预发布
+
+**ChecksumManifest**:
+由发布流水线在最终阶段聚合生成并挂载至 Release 资产的统一 SHA-256 哈希校验清单文件（`checksums.txt`）。
+_Avoid_: 散列文件, 签名文件
+
