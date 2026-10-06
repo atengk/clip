@@ -1,0 +1,44 @@
+# ==============================================================================
+# git-cliff 自动化变更日志配置 (atengk/clip)
+# 详见: https://git-cliff.org/docs/configuration
+# ==============================================================================
+
+[changelog]
+header = ""
+body = """
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group }}
+{% for commit in commits %}
+- {% if commit.scope %}**{{ commit.scope }}**: {% endif %}{{ commit.message | upper_first }} ({{ commit.id | truncate(length=7, end="") }})\
+{% endfor %}
+{% endfor %}\n
+"""
+trim = true
+
+[git]
+# 开启 Conventional Commits 解析
+conventional_commits = true
+# 即使未按规范前缀书写的普通提交也完整保留，杜绝漏掉任何变更
+filter_unconventional = false
+split_commits = false
+
+commit_parsers = [
+  { message = "^.*!:|BREAKING CHANGE", group = "💥 破坏性更新 (Breaking Changes)" },
+  { message = "^feat", group = "🚀 新特性 (Features)" },
+  { message = "^fix", group = "🐛 缺陷修复 (Bug Fixes)" },
+  { message = "^perf", group = "⚡ 性能优化 (Performance)" },
+  { message = "^refactor", group = "🚜 代码重构 (Refactor)" },
+  { message = "^docs", group = "📝 文档变动 (Documentation)" },
+  { message = "^style", group = "🎨 代码格式 (Style)" },
+  { message = "^test", group = "🧪 测试相关 (Tests)" },
+  { message = "^build", group = "📦 构建与依赖 (Build)" },
+  { message = "^ci", group = "👷 持续集成 (CI)" },
+  { message = "^chore", group = "🧹 杂项维护 (Chore)" },
+  { message = "^revert", group = "⏪ 代码回滚 (Revert)" },
+  { body = ".*", group = "💼 其他变更 (Other)" },
+]
+
+# 过滤与标签匹配规则
+protect_breaking_commits = false
+filter_commits = false
+tag_pattern = "v[0-9].*"

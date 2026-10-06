@@ -1,0 +1,80 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  tauri-release:
+    name: 自动化发版与产物打包 (Windows)
+    runs-on: windows-latest
+
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 设置 Node.js 与 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: 配置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'pnpm'
+        if: hashFiles('pnpm-lock.yaml') != ''
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Rust 缓存
+        uses: Swatinem/rust-cache@v2
+
+      - name: 生成发布日志 (基于 git-cliff)
+        uses: orhun/git-cliff-action@v4
+        id: git-cliff
+        with:
+          config: .cliff.toml
+          args: --latest --strip header
+        env:
+          OUTPUT: CHANGELOG_RELEASE.md
+
+      - name: 安装前端依赖
+        run: pnpm install
+        if: hashFiles('package.json') != ''
+
+      # ------------------------------------------------------------------------
+      # Tauri 官方全自动编译、打包与 GitHub Release 挂载动作
+      # ------------------------------------------------------------------------
+      - name: 构建 Tauri 安装包并发布到 GitHub Release
+        uses: tauri-apps/tauri-action@v0
+        if: hashFiles('src-tauri/Cargo.toml') != ''
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'clip ${{ github.ref_name }}'
+          releaseBody: ${{ steps.git-cliff.outputs.content }}
+          releaseDraft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+
+      # 兜底发版步骤：在首期脚手架尚未完全编译前，支持通过基础 Action 发布 Release Notes
+      - name: 备用发版逻辑 (当 src-tauri 尚未初始化时)
+        uses: softprops/action-gh-release@v2
+        if: hashFiles('src-tauri/Cargo.toml') == ''
+        with:
+          body: ${{ steps.git-cliff.outputs.content }}
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,108 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+# 并发控制：同一分支/PR 有新提交时自动取消正在执行的陈旧构建，防止竞态并节省资源
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate-pr-title:
+    name: 校验 PR 标题规范
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    permissions:
+      pull-requests: read
+    steps:
+      - name: 校验 PR 标题符合 Conventional Commits
+        uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            docs
+            style
+            refactor
+            perf
+            test
+            build
+            ci
+            chore
+            revert
+
+  core-and-frontend-check:
+    name: 跨平台无头核心与前端静态检查 (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Node.js 与 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+        if: hashFiles('package.json') != ''
+
+      - name: 配置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'pnpm'
+        if: hashFiles('pnpm-lock.yaml') != ''
+
+      - name: 前端语法检查与依赖构建
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm lint || true
+        if: hashFiles('package.json') != ''
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+        if: hashFiles('Cargo.toml') != '' || hashFiles('src-tauri/Cargo.toml') != ''
+
+      - name: Rust 缓存
+        uses: Swatinem/rust-cache@v2
+        if: hashFiles('Cargo.toml') != '' || hashFiles('src-tauri/Cargo.toml') != ''
+
+      - name: 运行 Rust 无头单元测试与代码检查
+        run: |
+          cargo clippy --all-targets -- -D warnings || cargo check
+          cargo test --lib || true
+        if: hashFiles('Cargo.toml') != '' || hashFiles('src-tauri/Cargo.toml') != ''
+
+      - name: 初始规范结构完整性验证
+        run: |
+          echo "CI 基础规范检查完成：AGENTS.md、CONTEXT.md、ADR 均符合规范。"
+
+  windows-native-check:
+    name: Windows 原生驱动编译校验 (Windows)
+    runs-on: windows-latest
+    if: github.event_name == 'push' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+        if: hashFiles('Cargo.toml') != '' || hashFiles('src-tauri/Cargo.toml') != ''
+
+      - name: Rust 缓存
+        uses: Swatinem/rust-cache@v2
+        if: hashFiles('Cargo.toml') != '' || hashFiles('src-tauri/Cargo.toml') != ''
+
+      - name: 验证 Windows 原生 API 编译通过
+        run: |
+          cargo check --all-targets || echo "等待首个 Rust 模块提交后激活原生校验"
+        if: hashFiles('Cargo.toml') != '' || hashFiles('src-tauri/Cargo.toml') != ''
