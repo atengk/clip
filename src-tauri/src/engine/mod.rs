@@ -8,13 +8,15 @@
 pub mod hash;
 pub mod pinyin;
 pub mod privacy;
+pub mod snippet;
 pub mod transform;
 
 use crate::engine::pinyin::PinyinMatcher;
 use crate::engine::privacy::PrivacyFilter;
+use crate::engine::snippet::{SnippetContext, SnippetEngine};
 use crate::engine::transform::{TextTransformer, TransformAction};
 use crate::pal::{PalError, PlatformDriver};
-use crate::storage::{ClipboardEntry, Storage, StorageError};
+use crate::storage::{ClipboardEntry, Snippet, Storage, StorageError};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -449,6 +451,63 @@ impl ClipboardEngine {
         self.paste_text(&transformed)?;
         Ok(transformed)
     }
+
+    /// 获取全部常用短语模板
+    pub fn get_all_snippets(&self) -> Result<Vec<Snippet>, EngineError> {
+        self.storage.get_all_snippets().map_err(EngineError::Storage)
+    }
+
+    /// 保存或更新常用短语模板
+    ///
+    /// @param id 指定 ID 则更新，None 则新建
+    /// @param title 短语标题
+    /// @param content 短语模板内容
+    /// @param shortcut 快捷缩写
+    pub fn save_snippet(
+        &self,
+        id: Option<i64>,
+        title: &str,
+        content: &str,
+        shortcut: &str,
+    ) -> Result<Snippet, EngineError> {
+        self.storage
+            .save_snippet(id, title, content, shortcut)
+            .map_err(EngineError::Storage)
+    }
+
+    /// 删除指定常用短语模板
+    ///
+    /// @param id 短语主键 ID
+    pub fn delete_snippet(&self, id: i64) -> Result<bool, EngineError> {
+        self.storage.delete_snippet(id).map_err(EngineError::Storage)
+    }
+
+    /// 搜索常用短语模板
+    ///
+    /// @param query 搜索关键词或前缀 (如 "/meet")
+    pub fn search_snippets(&self, query: &str) -> Result<Vec<Snippet>, EngineError> {
+        self.storage.search_snippets(query).map_err(EngineError::Storage)
+    }
+
+    /// 渲染并极速回填常用短语模板内容 (AC-2)
+    ///
+    /// 解析动态占位符（当前时间、日期、剪贴板等）并调用平台驱动回填展开后的真实文本。
+    ///
+    /// @param id 短语主键 ID
+    /// @return 渲染展开后的文本
+    pub fn paste_snippet(&self, id: i64) -> Result<String, EngineError> {
+        let snippet = self
+            .storage
+            .get_snippet_by_id(id)?
+            .ok_or(EngineError::EntryNotFound(id))?;
+
+        let current_clipboard = self.driver.read_text().ok().flatten();
+        let ctx = SnippetContext::now(current_clipboard);
+        let rendered = SnippetEngine::render(&snippet.content, &ctx);
+
+        self.paste_text(&rendered)?;
+        Ok(rendered)
+    }
 }
 
 #[cfg(test)]
@@ -782,5 +841,33 @@ mod tests {
         assert!(blob3.exists(), "存活条目的 Blob 文件必须保留");
 
         let _ = std::fs::remove_dir_all(&test_blob_dir);
+    }
+
+    #[test]
+    fn test_engine_paste_snippet_rendering_and_playback() {
+        let (driver, engine) = setup_engine();
+
+        // 1. 设置剪贴板现有文本
+        driver.write_text("https://github.com/atengk/clip").unwrap();
+
+        // 2. 创建短语模板，包含动态占位符
+        let snippet = engine
+            .save_snippet(
+                None,
+                "链接引用",
+                "参考链接: {clipboard}\n当前年份: {year}",
+                "ref",
+            )
+            .unwrap();
+
+        // 3. 触发回填短语
+        let rendered = engine.paste_snippet(snippet.id).unwrap();
+        assert!(rendered.contains("参考链接: https://github.com/atengk/clip"));
+        assert!(rendered.contains("当前年份:"));
+
+        // 4. 验证驱动接收到展开后的真实文本并触发了模拟粘贴
+        let final_text = driver.read_text().unwrap().unwrap();
+        assert_eq!(final_text, rendered);
+        assert_eq!(driver.paste_count(), 1);
     }
 }

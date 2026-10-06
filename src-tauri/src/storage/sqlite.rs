@@ -3,7 +3,7 @@
 //! @author Ateng
 //! @since 2026-10-06
 
-use crate::storage::{ClipboardEntry, Storage, StorageError};
+use crate::storage::{ClipboardEntry, Snippet, Storage, StorageError};
 use rusqlite::{params, Connection};
 use std::path::Path;
 use std::sync::Mutex;
@@ -81,9 +81,40 @@ impl SqliteStorage {
                 INSERT INTO clipboard_entries_fts(rowid, fts_content, pinyin_first, pinyin_full)
                 VALUES (new.id, new.fts_content, new.pinyin_first, new.pinyin_full);
             END;
+
+            -- 3. 常用短语模板表 (独立持久化，彻底隔离于剪贴板 1000 条上限与 LRU 淘汰)
+            CREATE TABLE IF NOT EXISTS snippets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                content TEXT NOT NULL,
+                shortcut TEXT NOT NULL DEFAULT '',
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_snippets_updated ON snippets(updated_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_snippets_shortcut ON snippets(shortcut);
             "#,
         )
         .map_err(|e| StorageError::DatabaseError(format!("初始化数据表与 FTS5 触发器失败: {e}")))?;
+
+        // 初始化内置开箱即用示例短语模板
+        let snippet_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM snippets", [], |r| r.get(0))
+            .unwrap_or(0);
+        if snippet_count == 0 {
+            let now_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as i64;
+            let _ = conn.execute(
+                "INSERT INTO snippets (title, content, shortcut, created_at, updated_at) VALUES
+                 ('今日站会汇报', '【{current_date} 站会汇报】\n1. 昨日进展：\n2. 今日计划：\n3. 阻塞风险：无', 'meet', ?1, ?1),
+                 ('当前时间戳', '{datetime}', 'time', ?1, ?1),
+                 ('剪贴板引用回复', '> {clipboard}\n\n已收到并处理。', 'quote', ?1, ?1)",
+                params![now_ms],
+            );
+        }
+
         Ok(())
     }
 }
@@ -354,6 +385,154 @@ impl Storage for SqliteStorage {
         let list = rows.flatten().collect();
         Ok(list)
     }
+
+    fn save_snippet(
+        &self,
+        id: Option<i64>,
+        title: &str,
+        content: &str,
+        shortcut: &str,
+    ) -> Result<Snippet, StorageError> {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        let conn = self.conn.lock().unwrap();
+
+        if let Some(target_id) = id {
+            let rows_affected = conn
+                .execute(
+                    "UPDATE snippets SET title = ?1, content = ?2, shortcut = ?3, updated_at = ?4 WHERE id = ?5",
+                    params![title, content, shortcut, now_ms, target_id],
+                )
+                .map_err(|e| StorageError::DatabaseError(format!("更新常用短语失败: {e}")))?;
+
+            if rows_affected == 0 {
+                return Err(StorageError::NotFound(target_id));
+            }
+
+            let created_at: i64 = conn
+                .query_row(
+                    "SELECT created_at FROM snippets WHERE id = ?1",
+                    params![target_id],
+                    |r| r.get(0),
+                )
+                .map_err(|e| StorageError::DatabaseError(format!("查询短语创建时间失败: {e}")))?;
+
+            Ok(Snippet {
+                id: target_id,
+                title: title.to_string(),
+                content: content.to_string(),
+                shortcut: shortcut.to_string(),
+                created_at,
+                updated_at: now_ms,
+            })
+        } else {
+            conn.execute(
+                "INSERT INTO snippets (title, content, shortcut, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![title, content, shortcut, now_ms, now_ms],
+            )
+            .map_err(|e| StorageError::DatabaseError(format!("新建常用短语失败: {e}")))?;
+
+            let new_id = conn.last_insert_rowid();
+            Ok(Snippet {
+                id: new_id,
+                title: title.to_string(),
+                content: content.to_string(),
+                shortcut: shortcut.to_string(),
+                created_at: now_ms,
+                updated_at: now_ms,
+            })
+        }
+    }
+
+    fn delete_snippet(&self, id: i64) -> Result<bool, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn
+            .execute("DELETE FROM snippets WHERE id = ?1", params![id])
+            .map_err(|e| StorageError::DatabaseError(format!("删除常用短语失败: {e}")))?;
+        Ok(rows > 0)
+    }
+
+    fn get_all_snippets(&self) -> Result<Vec<Snippet>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT id, title, content, shortcut, created_at, updated_at FROM snippets ORDER BY updated_at DESC, id DESC")
+            .map_err(|e| StorageError::DatabaseError(format!("准备查询所有短语失败: {e}")))?;
+
+        let rows = stmt
+            .query_map([], parse_snippet_row)
+            .map_err(|e| StorageError::DatabaseError(format!("执行查询所有短语失败: {e}")))?;
+
+        let list = rows.flatten().collect();
+        Ok(list)
+    }
+
+    fn get_snippet_by_id(&self, id: i64) -> Result<Option<Snippet>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT id, title, content, shortcut, created_at, updated_at FROM snippets WHERE id = ?1")
+            .map_err(|e| StorageError::DatabaseError(format!("准备按 ID 查询短语失败: {e}")))?;
+
+        let mut rows = stmt
+            .query_map(params![id], parse_snippet_row)
+            .map_err(|e| StorageError::DatabaseError(format!("执行按 ID 查询短语失败: {e}")))?;
+
+        match rows.next() {
+            Some(res) => res
+                .map(Some)
+                .map_err(|e| StorageError::DatabaseError(format!("解析短语失败: {e}"))),
+            None => Ok(None),
+        }
+    }
+
+    fn search_snippets(&self, query: &str) -> Result<Vec<Snippet>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let trimmed = query.trim();
+
+        if trimmed.starts_with('/') {
+            let shortcut_prefix = trimmed.trim_start_matches('/');
+            if shortcut_prefix.is_empty() {
+                drop(conn);
+                return self.get_all_snippets();
+            }
+            let pattern = format!("%{shortcut_prefix}%");
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, title, content, shortcut, created_at, updated_at FROM snippets
+                     WHERE shortcut LIKE ?1 OR title LIKE ?1
+                     ORDER BY CASE
+                         WHEN shortcut = ?2 THEN 0
+                         WHEN shortcut LIKE (?2 || '%') THEN 1
+                         ELSE 2
+                     END, updated_at DESC, id DESC",
+                )
+                .map_err(|e| StorageError::DatabaseError(format!("准备搜索短语失败: {e}")))?;
+
+            let rows = stmt
+                .query_map(params![pattern, shortcut_prefix], parse_snippet_row)
+                .map_err(|e| StorageError::DatabaseError(format!("执行搜索短语失败: {e}")))?;
+
+            let list = rows.flatten().collect();
+            Ok(list)
+        } else {
+            let pattern = format!("%{trimmed}%");
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, title, content, shortcut, created_at, updated_at FROM snippets
+                     WHERE title LIKE ?1 OR shortcut LIKE ?1 OR content LIKE ?1
+                     ORDER BY updated_at DESC, id DESC",
+                )
+                .map_err(|e| StorageError::DatabaseError(format!("准备搜索短语失败: {e}")))?;
+
+            let rows = stmt
+                .query_map(params![pattern], parse_snippet_row)
+                .map_err(|e| StorageError::DatabaseError(format!("执行搜索短语失败: {e}")))?;
+
+            let list = rows.flatten().collect();
+            Ok(list)
+        }
+    }
 }
 
 /// 解析 SQLite 数据行为剪贴板实体对象
@@ -364,6 +543,18 @@ fn parse_entry_row(row: &rusqlite::Row) -> rusqlite::Result<ClipboardEntry> {
         entry_type: row.get(2)?,
         created_at: row.get(3)?,
         is_pinned: row.get::<_, i64>(4)? != 0,
+    })
+}
+
+/// 解析 SQLite 数据行为常用短语实体对象
+fn parse_snippet_row(row: &rusqlite::Row) -> rusqlite::Result<Snippet> {
+    Ok(Snippet {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        content: row.get(2)?,
+        shortcut: row.get(3)?,
+        created_at: row.get(4)?,
+        updated_at: row.get(5)?,
     })
 }
 
@@ -519,4 +710,56 @@ mod tests {
         assert_eq!(search_res[0].id, entry.id);
         assert_eq!(search_res[0].entry_type, "image");
     }
+
+    #[test]
+    fn test_sqlite_snippets_crud_and_isolation_from_lru() {
+        let storage = SqliteStorage::new_in_memory().unwrap();
+        // 初始已有 3 个预置种子模板
+        let initial = storage.get_all_snippets().unwrap();
+        assert_eq!(initial.len(), 3);
+
+        // 新建自定义短语
+        let created = storage
+            .save_snippet(None, "请假申请", "主管您好，因个人事务申请请假一日。", "leave")
+            .unwrap();
+        assert!(created.id > 0);
+        assert_eq!(created.title, "请假申请");
+        assert_eq!(created.shortcut, "leave");
+
+        // 编辑更新短语
+        let updated = storage
+            .save_snippet(Some(created.id), "病假申请", "因身体不适申请病假一日。", "sick")
+            .unwrap();
+        assert_eq!(updated.id, created.id);
+        assert_eq!(updated.title, "病假申请");
+        assert_eq!(updated.shortcut, "sick");
+
+        // 验证剪贴板条目 LRU 清理彻底不影响短语库
+        storage.insert_text("item 1", "item 1", "", "").unwrap();
+        storage.prune_lru(0).unwrap();
+        let snippets_after_lru = storage.get_all_snippets().unwrap();
+        assert_eq!(snippets_after_lru.len(), 4, "短语库必须独立持久化且不受 LRU 淘汰影响");
+
+        // 删除短语
+        let deleted = storage.delete_snippet(created.id).unwrap();
+        assert!(deleted);
+        let by_id = storage.get_snippet_by_id(created.id).unwrap();
+        assert!(by_id.is_none());
+    }
+
+    #[test]
+    fn test_sqlite_snippets_search() {
+        let storage = SqliteStorage::new_in_memory().unwrap();
+        // 测试 / 前缀检索快捷命令
+        let res_meet = storage.search_snippets("/meet").unwrap();
+        assert_eq!(res_meet.len(), 1);
+        assert_eq!(res_meet[0].shortcut, "meet");
+        assert_eq!(res_meet[0].title, "今日站会汇报");
+
+        // 测试直接按名称检索
+        let res_time = storage.search_snippets("时间戳").unwrap();
+        assert_eq!(res_time.len(), 1);
+        assert_eq!(res_time[0].shortcut, "time");
+    }
 }
+

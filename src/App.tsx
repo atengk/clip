@@ -23,6 +23,39 @@ interface ClipboardEntry {
 }
 
 /**
+ * 常用短语实体模型 (遵循 CONTEXT.md 与工单 #8)
+ */
+export interface Snippet {
+  id: number;
+  title: string;
+  content: string;
+  shortcut: string;
+  created_at: number;
+  updated_at: number;
+}
+
+/**
+ * 顶部激活 Tab 模式
+ */
+export type ActiveTab = "history" | "snippets";
+
+/**
+ * 列表统一直观展示项模型
+ */
+export interface DisplayItem {
+  id: number;
+  isSnippet: boolean;
+  content: string;
+  title?: string;
+  shortcut?: string;
+  entry_type: string; // "text" | "image" | "snippet"
+  created_at: number;
+  is_pinned: boolean;
+  rawSnippet?: Snippet;
+  rawEntry?: ClipboardEntry;
+}
+
+/**
  * 图片多媒体元数据与 Base64 视图模型
  */
 interface ImageDetail {
@@ -87,8 +120,9 @@ const IMAGE_ACTIONS: ActionItem[] = [
 ];
 
 export const App: React.FC = () => {
+  const [activeTab, setActiveTab] = useState<ActiveTab>("history");
   const [query, setQuery] = useState<string>("");
-  const [entries, setEntries] = useState<ClipboardEntry[]>([]);
+  const [displayItems, setDisplayItems] = useState<DisplayItem[]>([]);
   const [selectedIndex, setSelectedIndex] = useState<number>(0);
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   const [actionPaletteOpen, setActionPaletteOpen] = useState<boolean>(false);
@@ -98,22 +132,112 @@ export const App: React.FC = () => {
   const [previewModalOpen, setPreviewModalOpen] = useState<boolean>(false);
   const [ocrTextMap, setOcrTextMap] = useState<Record<number, string>>({});
   const [ocrLoading, setOcrLoading] = useState<boolean>(false);
+
+  // 常用短语编辑模态框与表单状态 (AC-1)
+  const [snippetModalOpen, setSnippetModalOpen] = useState<boolean>(false);
+  const [editingSnippet, setEditingSnippet] = useState<Snippet | null>(null);
+  const [snippetTitle, setSnippetTitle] = useState<string>("");
+  const [snippetShortcut, setSnippetShortcut] = useState<string>("");
+  const [snippetContent, setSnippetContent] = useState<string>("");
+  const [snippetFormError, setSnippetFormError] = useState<string | null>(null);
+
   const inputRef = useRef<HTMLInputElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
   /**
-   * 加载或检索历史记录
+   * 加载或检索列表数据（支持剪贴板历史与常用短语独立 Tab 及混合模式）
    */
-  const fetchEntries = useCallback(async (searchQuery: string) => {
+  const loadData = useCallback(async (tab: ActiveTab, searchQuery: string) => {
     try {
       const q = searchQuery.trim();
+
+      // 1. 独立短语 Tab 模式 (AC-1)
+      if (tab === "snippets") {
+        let snippetsList: Snippet[];
+        if (q.length === 0) {
+          snippetsList = await invoke<Snippet[]>("get_snippets");
+        } else {
+          snippetsList = await invoke<Snippet[]>("search_snippets", { query: q });
+        }
+        setDisplayItems(
+          snippetsList.map((s) => ({
+            id: s.id,
+            isSnippet: true,
+            content: s.content,
+            title: s.title,
+            shortcut: s.shortcut,
+            entry_type: "snippet",
+            created_at: s.updated_at,
+            is_pinned: false,
+            rawSnippet: s,
+          }))
+        );
+        setSelectedIndex(0);
+        return;
+      }
+
+      // 2. 剪贴板历史 Tab 下以 / 开头触发短语快速搜索 (AC-3)
+      if (q.startsWith("/")) {
+        const snippetsList = await invoke<Snippet[]>("search_snippets", { query: q });
+        setDisplayItems(
+          snippetsList.map((s) => ({
+            id: s.id,
+            isSnippet: true,
+            content: s.content,
+            title: s.title,
+            shortcut: s.shortcut,
+            entry_type: "snippet",
+            created_at: s.updated_at,
+            is_pinned: false,
+            rawSnippet: s,
+          }))
+        );
+        setSelectedIndex(0);
+        return;
+      }
+
+      // 3. 常规剪贴板历史拉取
       let history: ClipboardEntry[];
       if (q.length === 0) {
         history = await invoke<ClipboardEntry[]>("get_history", { limit: 50 });
       } else {
         history = await invoke<ClipboardEntry[]>("search_history", { query: q, limit: 50 });
       }
-      setEntries(history);
+
+      // 若有关键词搜索，同时混合检索短语并置顶高亮微标展示 (AC-3)
+      let matchedSnippets: Snippet[] = [];
+      if (q.length > 0) {
+        try {
+          matchedSnippets = await invoke<Snippet[]>("search_snippets", { query: q });
+        } catch {
+          // ignore
+        }
+      }
+
+      const snippetItems: DisplayItem[] = matchedSnippets.map((s) => ({
+        id: s.id,
+        isSnippet: true,
+        content: s.content,
+        title: s.title,
+        shortcut: s.shortcut,
+        entry_type: "snippet",
+        created_at: s.updated_at,
+        is_pinned: false,
+        rawSnippet: s,
+      }));
+
+      const historyItems: DisplayItem[] = history.map((item) => ({
+        id: item.id,
+        isSnippet: false,
+        content: item.content,
+        entry_type: item.entry_type,
+        created_at: item.created_at,
+        is_pinned: item.is_pinned,
+        rawEntry: item,
+      }));
+
+      setDisplayItems([...snippetItems, ...historyItems]);
       setSelectedIndex(0);
 
       // 并行批量拉取图片缩略图 Base64 详情并缓存
@@ -126,14 +250,12 @@ export const App: React.FC = () => {
           .catch((err) => console.error("加载图片详情失败:", err));
       }
     } catch (err) {
-      console.error("加载/检索剪贴板历史失败:", err);
+      console.error("加载列表数据失败:", err);
     }
   }, []);
 
   /**
    * 触发指定条目的极速回填
-   *
-   * @param id 条目唯一主键 ID
    */
   const handlePaste = useCallback(async (id: number) => {
     try {
@@ -145,9 +267,19 @@ export const App: React.FC = () => {
   }, []);
 
   /**
+   * 触发常用短语的极速回填与模板动态变量解析 (AC-2)
+   */
+  const handlePasteSnippet = useCallback(async (id: number) => {
+    try {
+      await invoke("paste_snippet", { id });
+      setPreviewModalOpen(false);
+    } catch (err) {
+      console.error("回填常用短语失败:", err);
+    }
+  }, []);
+
+  /**
    * 触发自定义文本（如 OCR 提取文本）的极速回填
-   *
-   * @param text 待回填的目标文本
    */
   const handlePasteCustomText = useCallback(async (text: string) => {
     try {
@@ -160,32 +292,30 @@ export const App: React.FC = () => {
 
   /**
    * 触发指定图片条目的原生离线 OCR 识别
-   *
-   * @param id 条目唯一主键 ID
    */
-  const handleOcr = useCallback(async (id: number) => {
-    setOcrLoading(true);
-    setTransformError(null);
-    try {
-      const recognized = await invoke<string>("ocr_image_entry", { id });
-      setOcrTextMap((prev) => ({ ...prev, [id]: recognized }));
-      setPreviewModalOpen(true);
-      fetchEntries(query);
-    } catch (err: unknown) {
-      const msg = typeof err === "string" ? err : "文字提取失败";
-      setTransformError(msg);
-      setTimeout(() => setTransformError(null), 3000);
-    } finally {
-      setOcrLoading(false);
-      setActionPaletteOpen(false);
-    }
-  }, [fetchEntries, query]);
+  const handleOcr = useCallback(
+    async (id: number) => {
+      setOcrLoading(true);
+      setTransformError(null);
+      try {
+        const recognized = await invoke<string>("ocr_image_entry", { id });
+        setOcrTextMap((prev) => ({ ...prev, [id]: recognized }));
+        setPreviewModalOpen(true);
+        loadData(activeTab, query);
+      } catch (err: unknown) {
+        const msg = typeof err === "string" ? err : "文字提取失败";
+        setTransformError(msg);
+        setTimeout(() => setTransformError(null), 3000);
+      } finally {
+        setOcrLoading(false);
+        setActionPaletteOpen(false);
+      }
+    },
+    [loadData, activeTab, query]
+  );
 
   /**
    * 触发指定条目的动作转换与极速回填
-   *
-   * @param id 条目唯一主键 ID
-   * @param actionKey 转换动作标识
    */
   const handleTransformAndPaste = useCallback(async (id: number, actionKey: ActionKey) => {
     setTransformError(null);
@@ -215,8 +345,6 @@ export const App: React.FC = () => {
 
   /**
    * 强制以纯文本格式回填当前条目 (Shift + Enter 专用)
-   *
-   * @param id 条目唯一主键 ID
    */
   const handlePastePlain = useCallback(async (id: number) => {
     try {
@@ -229,8 +357,6 @@ export const App: React.FC = () => {
 
   /**
    * 切换指定条目的置顶固定状态 (Pin / Unpin)
-   *
-   * @param id 条目唯一 ID
    */
   const handleTogglePin = useCallback(
     async (id: number, e?: React.MouseEvent) => {
@@ -239,13 +365,101 @@ export const App: React.FC = () => {
       }
       try {
         await invoke("toggle_pin", { id });
-        fetchEntries(query);
+        loadData(activeTab, query);
       } catch (err) {
         console.error("切换置顶状态失败:", err);
       }
     },
-    [fetchEntries, query]
+    [loadData, activeTab, query]
   );
+
+  /**
+   * 打开新建常用短语弹窗
+   */
+  const handleOpenCreateSnippet = useCallback(() => {
+    setEditingSnippet(null);
+    setSnippetTitle("");
+    setSnippetShortcut("");
+    setSnippetContent("");
+    setSnippetFormError(null);
+    setSnippetModalOpen(true);
+  }, []);
+
+  /**
+   * 打开编辑常用短语弹窗
+   */
+  const handleOpenEditSnippet = useCallback((snippet: Snippet, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    setEditingSnippet(snippet);
+    setSnippetTitle(snippet.title);
+    setSnippetShortcut(snippet.shortcut);
+    setSnippetContent(snippet.content);
+    setSnippetFormError(null);
+    setSnippetModalOpen(true);
+  }, []);
+
+  /**
+   * 删除常用短语 (AC-1)
+   */
+  const handleDeleteSnippet = useCallback(
+    async (id: number, e?: React.MouseEvent) => {
+      if (e) e.stopPropagation();
+      try {
+        await invoke("delete_snippet", { id });
+        loadData(activeTab, query);
+      } catch (err) {
+        console.error("删除常用短语失败:", err);
+      }
+    },
+    [activeTab, query, loadData]
+  );
+
+  /**
+   * 保存或更新常用短语模板 (AC-1)
+   */
+  const handleSaveSnippet = useCallback(async () => {
+    if (!snippetTitle.trim()) {
+      setSnippetFormError("短语标题不能为空");
+      return;
+    }
+    if (!snippetContent.trim()) {
+      setSnippetFormError("短语模板内容不能为空");
+      return;
+    }
+    try {
+      await invoke("save_snippet", {
+        id: editingSnippet ? editingSnippet.id : null,
+        title: snippetTitle.trim(),
+        content: snippetContent,
+        shortcut: snippetShortcut.trim(),
+      });
+      setSnippetModalOpen(false);
+      loadData(activeTab, query);
+    } catch (err: unknown) {
+      const msg = typeof err === "string" ? err : "保存短语失败";
+      setSnippetFormError(msg);
+    }
+  }, [editingSnippet, snippetTitle, snippetContent, snippetShortcut, activeTab, query, loadData]);
+
+  /**
+   * 快捷向模板内容光标处插入动态占位符变量 (AC-2)
+   */
+  const insertPlaceholder = useCallback((ph: string) => {
+    if (textareaRef.current) {
+      const el = textareaRef.current;
+      const start = el.selectionStart;
+      const end = el.selectionEnd;
+      const val = el.value;
+      const next = val.substring(0, start) + ph + val.substring(end);
+      setSnippetContent(next);
+      setTimeout(() => {
+        el.focus();
+        el.setSelectionRange(start + ph.length, start + ph.length);
+      }, 10);
+    } else {
+      setSnippetContent((prev) => prev + ph);
+    }
+  }, []);
 
   /**
    * 主动隐藏悬浮面板
@@ -253,6 +467,7 @@ export const App: React.FC = () => {
   const handleClose = useCallback(async () => {
     setActionPaletteOpen(false);
     setPreviewModalOpen(false);
+    setSnippetModalOpen(false);
     try {
       await invoke("hide_window");
     } catch (err) {
@@ -264,25 +479,34 @@ export const App: React.FC = () => {
   const handleQueryChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value;
     setQuery(val);
-    fetchEntries(val);
+    loadData(activeTab, val);
+  };
+
+  // Tab 模式切换
+  const handleTabChange = (newTab: ActiveTab) => {
+    setActiveTab(newTab);
+    loadData(newTab, query);
+    inputRef.current?.focus();
   };
 
   // 监听后端广播事件与窗口唤起
   useEffect(() => {
-    fetchEntries("");
+    loadData(activeTab, "");
 
     // 1. 监听系统剪贴板更新事件
     const unlistenClipboard = listen<ClipboardEntry>("clipboard-changed", () => {
-      fetchEntries(query);
+      loadData(activeTab, query);
     });
 
     // 2. 监听窗口唤起展示事件 (初始化焦点与清空历史)
     const unlistenPanelShown = listen("panel-shown", () => {
       setQuery("");
-      fetchEntries("");
+      setActiveTab("history");
+      loadData("history", "");
       setSelectedIndex(0);
       setActionPaletteOpen(false);
       setPreviewModalOpen(false);
+      setSnippetModalOpen(false);
       setTimeout(() => {
         inputRef.current?.focus();
         inputRef.current?.select();
@@ -300,8 +524,9 @@ export const App: React.FC = () => {
       unlistenPanelShown.then((f) => f());
       window.removeEventListener("blur", handleBlur);
     };
-  }, [fetchEntries, query, handleClose]);
+  }, [loadData, activeTab, query, handleClose]);
 
+  // 全局键盘导航处理
   // 全局键盘导航处理
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -310,7 +535,18 @@ export const App: React.FC = () => {
         return;
       }
 
-      // 2. 大图放大预览模态框开启时的键盘路由
+      // 2. 短语编辑模态框处于开启态时的键盘路由
+      if (snippetModalOpen) {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          setSnippetModalOpen(false);
+          return;
+        }
+        // 模态框内打字编辑时不拦截其它输入
+        return;
+      }
+
+      // 3. 大图放大预览模态框开启时的键盘路由
       if (previewModalOpen) {
         if (e.key === "Escape" || e.key === " ") {
           e.preventDefault();
@@ -319,7 +555,7 @@ export const App: React.FC = () => {
         }
         if (e.key === "Enter") {
           e.preventDefault();
-          const current = entries[selectedIndex];
+          const current = displayItems[selectedIndex];
           if (current) {
             handlePaste(current.id);
           }
@@ -329,9 +565,9 @@ export const App: React.FC = () => {
         return;
       }
 
-      // 3. Action Palette 处于激活态时的键盘路由
+      // 4. Action Palette 处于激活态时的键盘路由
       if (actionPaletteOpen) {
-        const current = entries[selectedIndex];
+        const current = displayItems[selectedIndex];
         const activeActions = current?.entry_type === "image" ? IMAGE_ACTIONS : TRANSFORM_ACTIONS;
 
         if (e.key === "Escape" || (e.ctrlKey && (e.key === "k" || e.key === "K")) || e.key === "Tab") {
@@ -355,8 +591,8 @@ export const App: React.FC = () => {
         if (e.key === "Enter") {
           e.preventDefault();
           const action = activeActions[actionSelectedIndex];
-          if (current && action) {
-            executeAction(current, action.key);
+          if (current && current.rawEntry && action) {
+            executeAction(current.rawEntry, action.key);
           }
           return;
         }
@@ -365,20 +601,19 @@ export const App: React.FC = () => {
         if (e.key >= "1" && e.key <= String(activeActions.length)) {
           const actionIdx = parseInt(e.key, 10) - 1;
           const action = activeActions[actionIdx];
-          if (current && action) {
+          if (current && current.rawEntry && action) {
             e.preventDefault();
-            executeAction(current, action.key);
+            executeAction(current.rawEntry, action.key);
             return;
           }
         }
 
-        // 动作浮层开启时，彻底拦截其它所有按键输入，杜绝穿透修改背景搜索框
         e.preventDefault();
         e.stopPropagation();
         return;
       }
 
-      // 4. 主列表状态下的按键调度
+      // 5. 主列表状态下的按键调度
       // Esc: 瞬间无感自隐并释放焦点
       if (e.key === "Escape") {
         e.preventDefault();
@@ -386,20 +621,40 @@ export const App: React.FC = () => {
         return;
       }
 
-      // Tab 或 Ctrl+K: 唤出 Action Palette 动作浮层
-      if ((e.ctrlKey && (e.key === "k" || e.key === "K")) || e.key === "Tab") {
+      // Ctrl + 1 / Ctrl + 2: 切换 Tab 模式
+      if (e.ctrlKey && e.key === "1") {
         e.preventDefault();
-        if (entries.length > 0 && entries[selectedIndex]) {
+        handleTabChange("history");
+        return;
+      }
+      if (e.ctrlKey && e.key === "2") {
+        e.preventDefault();
+        handleTabChange("snippets");
+        return;
+      }
+
+      // Ctrl + N: 新建常用短语
+      if (e.ctrlKey && (e.key === "n" || e.key === "N")) {
+        e.preventDefault();
+        handleOpenCreateSnippet();
+        return;
+      }
+
+      // Tab 或 Ctrl+K: 唤出 Action Palette 动作浮层 (仅对历史条目生效)
+      if ((e.ctrlKey && (e.key === "k" || e.key === "K")) || e.key === "Tab") {
+        const current = displayItems[selectedIndex];
+        if (current && !current.isSnippet) {
+          e.preventDefault();
           setActionSelectedIndex(0);
           setActionPaletteOpen(true);
+          return;
         }
-        return;
       }
 
       // Space 或 Alt+Space: 图片大图放大预览
       const isSpaceTrigger = (e.key === " " && (document.activeElement !== inputRef.current || query.length === 0)) || (e.altKey && e.key === " ");
       if (isSpaceTrigger) {
-        const current = entries[selectedIndex];
+        const current = displayItems[selectedIndex];
         if (current && current.entry_type === "image") {
           e.preventDefault();
           setPreviewModalOpen(true);
@@ -407,21 +662,21 @@ export const App: React.FC = () => {
         }
       }
 
-      // Shift + Enter: 强制纯文本格式极速回填
+      // Shift + Enter: 强制纯文本格式极速回填 (仅普通文本条目生效)
       if (e.shiftKey && e.key === "Enter") {
         e.preventDefault();
-        const current = entries[selectedIndex];
-        if (current) {
+        const current = displayItems[selectedIndex];
+        if (current && !current.isSnippet && current.entry_type === "text") {
           handlePastePlain(current.id);
         }
         return;
       }
 
-      // Alt + P 快捷切换当前选中项置顶
+      // Alt + P 快捷切换当前选中项置顶 (仅历史条目生效)
       if (e.altKey && (e.key === "p" || e.key === "P")) {
         e.preventDefault();
-        const current = entries[selectedIndex];
-        if (current) {
+        const current = displayItems[selectedIndex];
+        if (current && !current.isSnippet) {
           handleTogglePin(current.id);
         }
         return;
@@ -435,10 +690,14 @@ export const App: React.FC = () => {
 
       if (shouldFastPasteNumber) {
         const num = parseInt(e.key, 10);
-        const targetEntry = entries[num - 1];
-        if (targetEntry) {
+        const targetItem = displayItems[num - 1];
+        if (targetItem) {
           e.preventDefault();
-          handlePaste(targetEntry.id);
+          if (targetItem.isSnippet) {
+            handlePasteSnippet(targetItem.id);
+          } else {
+            handlePaste(targetItem.id);
+          }
           return;
         }
       }
@@ -446,16 +705,20 @@ export const App: React.FC = () => {
       // 上下方向键导航
       if (e.key === "ArrowDown") {
         e.preventDefault();
-        setSelectedIndex((prev) => (prev < entries.length - 1 ? prev + 1 : prev));
+        setSelectedIndex((prev) => (prev < displayItems.length - 1 ? prev + 1 : prev));
       } else if (e.key === "ArrowUp") {
         e.preventDefault();
         setSelectedIndex((prev) => (prev > 0 ? prev - 1 : 0));
       } else if (e.key === "Enter") {
-        // 回车极速回填当前高亮条目
+        // 回车极速回填当前高亮条目 (AC-2 & AC-3)
         e.preventDefault();
-        const current = entries[selectedIndex];
+        const current = displayItems[selectedIndex];
         if (current) {
-          handlePaste(current.id);
+          if (current.isSnippet) {
+            handlePasteSnippet(current.id);
+          } else {
+            handlePaste(current.id);
+          }
         }
       }
     };
@@ -463,24 +726,49 @@ export const App: React.FC = () => {
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [
-    entries,
+    displayItems,
     selectedIndex,
     query,
+    snippetModalOpen,
     actionPaletteOpen,
     actionSelectedIndex,
     previewModalOpen,
-    fetchEntries,
     handleClose,
     handlePaste,
     handlePastePlain,
+    handlePasteSnippet,
     handleTransformAndPaste,
     handleTogglePin,
-    handleOcr,
+    handleOpenCreateSnippet,
+    handleTabChange,
+    executeAction,
   ]);
 
   return (
     <div className="panel-container">
       <header className="panel-header" data-tauri-drag-region>
+        <div className="tab-bar">
+          <div className="tab-group">
+            <button
+              className={`tab-btn ${activeTab === "history" ? "active" : ""}`}
+              onClick={() => handleTabChange("history")}
+            >
+              📋 剪贴板历史
+            </button>
+            <button
+              className={`tab-btn ${activeTab === "snippets" ? "active" : ""}`}
+              onClick={() => handleTabChange("snippets")}
+            >
+              ⚡ 常用短语
+            </button>
+          </div>
+          {activeTab === "snippets" && (
+            <button className="new-snippet-btn" onClick={handleOpenCreateSnippet} title="新建短语模板 (Ctrl+N)">
+              + 新建短语
+            </button>
+          )}
+        </div>
+
         <div className="search-bar">
           <span className="search-icon">🔍</span>
           <input
@@ -489,38 +777,117 @@ export const App: React.FC = () => {
             className="search-input"
             value={query}
             onChange={handleQueryChange}
-            placeholder="搜索剪贴板（支持中文拼音简拼如 yhk、全拼及多词空格）..."
+            placeholder={
+              activeTab === "snippets"
+                ? "搜索短语（支持标题、/缩写如 /meet 或内容）..."
+                : "搜索剪贴板（输入 / 快速唤起常用短语，支持中文拼音）..."
+            }
             autoFocus
           />
         </div>
         <div className="shortcut-hints">
-          <span className="hint-tag"><kbd>Tab</kbd> / <kbd>Ctrl+K</kbd> 动作</span>
-          <span className="hint-tag"><kbd>Space</kbd> 大图预览</span>
-          <span className="hint-tag"><kbd>1~9</kbd> 回填</span>
-          <span className="hint-tag"><kbd>Alt+P</kbd> 置顶</span>
-          <span className="hint-tag"><kbd>Esc</kbd> 自隐</span>
+          {activeTab === "snippets" ? (
+            <>
+              <span className="hint-tag"><kbd>1~9</kbd> / <kbd>↵</kbd> 回填</span>
+              <span className="hint-tag"><kbd>Ctrl+N</kbd> 新建</span>
+              <span className="hint-tag"><kbd>Ctrl+1</kbd> 历史</span>
+              <span className="hint-tag"><kbd>Esc</kbd> 自隐</span>
+            </>
+          ) : (
+            <>
+              <span className="hint-tag"><kbd>/</kbd> 短语命令</span>
+              <span className="hint-tag"><kbd>Tab</kbd> / <kbd>Ctrl+K</kbd> 动作</span>
+              <span className="hint-tag"><kbd>1~9</kbd> 回填</span>
+              <span className="hint-tag"><kbd>Alt+P</kbd> 置顶</span>
+              <span className="hint-tag"><kbd>Esc</kbd> 自隐</span>
+            </>
+          )}
         </div>
       </header>
 
       <div className="panel-list" ref={listRef}>
-        {entries.length === 0 ? (
+        {displayItems.length === 0 ? (
           <div className="empty-state">
-            <p>{query ? "未找到匹配条目" : "暂无剪贴板历史记录"}</p>
+            <p>{query ? "未找到匹配条目" : activeTab === "snippets" ? "暂无常用短语模板" : "暂无剪贴板历史记录"}</p>
             <span className="empty-sub">
-              {query ? "尝试更换拼音首字母简拼或模糊关键词" : "复制任意文本或截屏图片后将自动捕获并在此显示"}
+              {query
+                ? "尝试更换拼音首字母简拼或模糊关键词"
+                : activeTab === "snippets"
+                ? "点击上方 [+ 新建短语] 预置高频常用回复或模板"
+                : "复制任意文本或截屏图片后将自动捕获并在此显示"}
             </span>
           </div>
         ) : (
-          entries.map((item, index) => {
+          displayItems.map((item, index) => {
             const isSelected = index === selectedIndex;
             const fastPasteIndex = index < 9 ? index + 1 : null;
 
+            // 1. 常用短语模板卡片 (AC-1 & AC-3)
+            if (item.isSnippet) {
+              return (
+                <div
+                  key={`snippet-${item.id}`}
+                  className={`panel-item snippet-item ${isSelected ? "selected" : ""}`}
+                  onClick={() => handlePasteSnippet(item.id)}
+                  onMouseEnter={() => {
+                    setSelectedIndex(index);
+                    setHoveredIndex(index);
+                  }}
+                  onMouseLeave={() => {
+                    if (hoveredIndex === index) {
+                      setHoveredIndex(null);
+                    }
+                  }}
+                >
+                  <div className="item-badge">
+                    {fastPasteIndex ? (
+                      <span className="badge-num">{fastPasteIndex}</span>
+                    ) : (
+                      <span className="badge-dot">•</span>
+                    )}
+                  </div>
+                  <div className="item-content">
+                    <div className="item-text-line">
+                      <span className="tag-snippet">[短语]</span>
+                      {item.shortcut && <span className="tag-shortcut">/{item.shortcut}</span>}
+                      <span className="snippet-title-text">{item.title}</span>
+                    </div>
+                    <div className="snippet-preview-text">
+                      {item.content.length > 90 ? item.content.slice(0, 90) + "..." : item.content}
+                    </div>
+                  </div>
+                  <div className="item-meta">
+                    {item.rawSnippet && (
+                      <>
+                        <button
+                          className="snippet-action-btn"
+                          onClick={(e) => handleOpenEditSnippet(item.rawSnippet!, e)}
+                          title="编辑短语"
+                        >
+                          ✏️
+                        </button>
+                        <button
+                          className="snippet-action-btn del"
+                          onClick={(e) => handleDeleteSnippet(item.id, e)}
+                          title="删除短语"
+                        >
+                          🗑️
+                        </button>
+                      </>
+                    )}
+                    <span className="item-len">模板</span>
+                  </div>
+                </div>
+              );
+            }
+
+            // 2. 图片多媒体卡片 (Issue #7)
             if (item.entry_type === "image") {
               const imgDetail = imageDetails[item.content];
               const ocrText = ocrTextMap[item.id];
               return (
                 <div
-                  key={item.id}
+                  key={`entry-${item.id}`}
                   className={`panel-item image-item ${isSelected ? "selected" : ""} ${item.is_pinned ? "pinned" : ""}`}
                   onClick={() => handlePaste(item.id)}
                   onMouseEnter={() => {
@@ -597,17 +964,17 @@ export const App: React.FC = () => {
               );
             }
 
+            // 3. 纯文本条目卡片
             const isLargeText = item.content.length > LARGE_TEXT_THRESHOLD;
             const { displayText: maskedText, isSensitive } = maskSensitiveContent(item.content);
             const isHovered = index === hoveredIndex;
             const isRevealed = isSensitive && isHovered;
             const activeText = isSensitive && !isRevealed ? maskedText : item.content;
-            // 对超大文本进行 DOM 渲染截断保护，避免前端视图卡死
             const displayText = isLargeText ? activeText.slice(0, 300) + "..." : activeText;
 
             return (
               <div
-                key={item.id}
+                key={`entry-${item.id}`}
                 className={`panel-item ${isSelected ? "selected" : ""} ${item.is_pinned ? "pinned" : ""}`}
                 onClick={() => handlePaste(item.id)}
                 onMouseEnter={() => {
@@ -674,7 +1041,7 @@ export const App: React.FC = () => {
         )}
       </div>
 
-      {actionPaletteOpen && entries[selectedIndex] && (
+      {actionPaletteOpen && displayItems[selectedIndex]?.rawEntry && (
         <div
           className="action-palette-overlay"
           onClick={() => setActionPaletteOpen(false)}
@@ -691,18 +1058,21 @@ export const App: React.FC = () => {
                 <div className="palette-error">⚠️ {transformError}</div>
               ) : (
                 <div className="palette-sub">
-                  目标条目: {entries[selectedIndex].entry_type === "image" ? `[图片] ${entries[selectedIndex].content.slice(0, 32)}...` : `${entries[selectedIndex].content.slice(0, 48).replace(/\n/g, " ")}...`}
+                  目标条目: {displayItems[selectedIndex].entry_type === "image" ? `[图片] ${displayItems[selectedIndex].content.slice(0, 32)}...` : `${displayItems[selectedIndex].content.slice(0, 48).replace(/\n/g, " ")}...`}
                 </div>
               )}
             </div>
             <div className="palette-list">
-              {(entries[selectedIndex].entry_type === "image" ? IMAGE_ACTIONS : TRANSFORM_ACTIONS).map((action, idx) => {
+              {(displayItems[selectedIndex].entry_type === "image" ? IMAGE_ACTIONS : TRANSFORM_ACTIONS).map((action, idx) => {
                 const isActionSelected = idx === actionSelectedIndex;
                 return (
                   <div
                     key={action.key}
                     className={`palette-item ${isActionSelected ? "selected" : ""}`}
-                    onClick={() => executeAction(entries[selectedIndex], action.key)}
+                    onClick={() => {
+                      const entry = displayItems[selectedIndex].rawEntry;
+                      if (entry) executeAction(entry, action.key);
+                    }}
                     onMouseEnter={() => setActionSelectedIndex(idx)}
                   >
                     <span className="palette-icon">{action.icon}</span>
@@ -725,7 +1095,7 @@ export const App: React.FC = () => {
         </div>
       )}
 
-      {previewModalOpen && entries[selectedIndex]?.entry_type === "image" && (
+      {previewModalOpen && displayItems[selectedIndex]?.entry_type === "image" && (
         <div
           className="image-preview-overlay"
           onClick={() => setPreviewModalOpen(false)}
@@ -746,55 +1116,142 @@ export const App: React.FC = () => {
               </button>
             </div>
             <div className="image-preview-body">
-              {imageDetails[entries[selectedIndex].content] && (
+              {imageDetails[displayItems[selectedIndex].content] && (
                 <img
-                  src={imageDetails[entries[selectedIndex].content].data_url}
+                  src={imageDetails[displayItems[selectedIndex].content].data_url}
                   alt="大图预览"
                   className="image-preview-img"
                 />
               )}
-              {ocrTextMap[entries[selectedIndex].id] && (
+              {ocrTextMap[displayItems[selectedIndex].id] && (
                 <div className="ocr-result-container">
                   <div className="ocr-header">
                     <span>🔍 离线 OCR 提取文本：</span>
                     <button
                       className="preview-action-btn"
-                      onClick={() => handlePasteCustomText(ocrTextMap[entries[selectedIndex].id])}
+                      onClick={() => handlePasteCustomText(ocrTextMap[displayItems[selectedIndex].id])}
                       title="粘贴提取文本"
                     >
                       📄 回填文本
                     </button>
                   </div>
                   <div className="ocr-text-view">
-                    {ocrTextMap[entries[selectedIndex].id]}
+                    {ocrTextMap[displayItems[selectedIndex].id]}
                   </div>
                 </div>
               )}
             </div>
             <div className="image-preview-footer">
               <div className="image-preview-info">
-                {imageDetails[entries[selectedIndex].content] && (
+                {imageDetails[displayItems[selectedIndex].content] && (
                   <>
-                    <span>尺寸: {imageDetails[entries[selectedIndex].content].width} × {imageDetails[entries[selectedIndex].content].height} 像素</span>
-                    <span>大小: {formatBytes(imageDetails[entries[selectedIndex].content].file_size)}</span>
+                    <span>尺寸: {imageDetails[displayItems[selectedIndex].content].width} × {imageDetails[displayItems[selectedIndex].content].height} 像素</span>
+                    <span>大小: {formatBytes(imageDetails[displayItems[selectedIndex].content].file_size)}</span>
                   </>
                 )}
               </div>
               <div className="image-preview-actions">
                 <button
                   className="preview-action-btn"
-                  onClick={() => handleOcr(entries[selectedIndex].id)}
+                  onClick={() => handleOcr(displayItems[selectedIndex].id)}
                   disabled={ocrLoading}
                 >
                   {ocrLoading ? "⏳ 识别中..." : "🔍 提取文字 (OCR)"}
                 </button>
                 <button
                   className="preview-action-btn primary"
-                  onClick={() => handlePaste(entries[selectedIndex].id)}
+                  onClick={() => handlePaste(displayItems[selectedIndex].id)}
                 >
                   ↵ 极速回填图片
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {snippetModalOpen && (
+        <div className="snippet-modal-overlay" onClick={() => setSnippetModalOpen(false)}>
+          <div className="snippet-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="snippet-modal-header">
+              <div className="snippet-modal-title">
+                <span>{editingSnippet ? "✏️ 编辑常用短语" : "✨ 新建常用短语"}</span>
+              </div>
+              <button className="snippet-modal-close" onClick={() => setSnippetModalOpen(false)}>
+                ✕
+              </button>
+            </div>
+            <div className="snippet-modal-body">
+              {snippetFormError && <div className="modal-error">⚠️ {snippetFormError}</div>}
+              <div className="form-group">
+                <label className="form-label">短语标题 <span className="req">*</span></label>
+                <input
+                  type="text"
+                  className="form-input"
+                  value={snippetTitle}
+                  onChange={(e) => setSnippetTitle(e.target.value)}
+                  placeholder="例如: 今日站会汇报、常用联系信息"
+                  autoFocus
+                />
+              </div>
+              <div className="form-group">
+                <label className="form-label">快捷指令 (输入 /{snippetShortcut || "shortcut"} 快速唤起)</label>
+                <div className="shortcut-input-wrapper">
+                  <span className="shortcut-prefix">/</span>
+                  <input
+                    type="text"
+                    className="form-input shortcut-input"
+                    value={snippetShortcut}
+                    onChange={(e) => setSnippetShortcut(e.target.value)}
+                    placeholder="如 meet、info、ref"
+                  />
+                </div>
+              </div>
+              <div className="form-group">
+                <div className="form-label-row">
+                  <label className="form-label">模板内容 <span className="req">*</span></label>
+                  <span className="form-tip">点击插入动态占位符变量</span>
+                </div>
+                <div className="placeholder-toolbar">
+                  <button type="button" className="ph-btn" onClick={() => insertPlaceholder("{current_date}")} title="当前日期 (YYYY-MM-DD)">
+                    + &#123;current_date&#125;
+                  </button>
+                  <button type="button" className="ph-btn" onClick={() => insertPlaceholder("{time}")} title="当前时间 (HH:mm:ss)">
+                    + &#123;time&#125;
+                  </button>
+                  <button type="button" className="ph-btn" onClick={() => insertPlaceholder("{datetime}")} title="完整时间 (YYYY-MM-DD HH:mm:ss)">
+                    + &#123;datetime&#125;
+                  </button>
+                  <button type="button" className="ph-btn" onClick={() => insertPlaceholder("{clipboard}")} title="展开时嵌入当前系统剪贴板文本">
+                    + &#123;clipboard&#125;
+                  </button>
+                  <button type="button" className="ph-btn" onClick={() => insertPlaceholder("{year}")} title="年份">
+                    + &#123;year&#125;
+                  </button>
+                  <button type="button" className="ph-btn" onClick={() => insertPlaceholder("{month}")} title="月份">
+                    + &#123;month&#125;
+                  </button>
+                  <button type="button" className="ph-btn" onClick={() => insertPlaceholder("{day}")} title="日">
+                    + &#123;day&#125;
+                  </button>
+                </div>
+                <textarea
+                  ref={textareaRef}
+                  className="form-textarea"
+                  rows={5}
+                  value={snippetContent}
+                  onChange={(e) => setSnippetContent(e.target.value)}
+                  placeholder="请输入短语内容模板。支持嵌入动态占位符，如：&#10;【{current_date} 站会汇报】&#10;1. 昨日进展：&#10;2. 今日计划："
+                />
+              </div>
+            </div>
+            <div className="snippet-modal-footer">
+              <button className="btn-cancel" onClick={() => setSnippetModalOpen(false)}>
+                取消
+              </button>
+              <button className="btn-primary" onClick={handleSaveSnippet}>
+                保存短语
+              </button>
             </div>
           </div>
         </div>

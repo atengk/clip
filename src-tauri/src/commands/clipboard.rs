@@ -5,7 +5,7 @@
 
 use crate::commands::AppState;
 use crate::engine::transform::TransformAction;
-use crate::storage::ClipboardEntry;
+use crate::storage::{ClipboardEntry, Snippet};
 use std::thread;
 use std::time::Duration;
 use tauri::{AppHandle, Manager, State};
@@ -206,3 +206,89 @@ pub fn paste_custom_text(
         .paste_text(&text)
         .map_err(|e| format!("执行回填失败: {e}"))
 }
+
+/// 获取全部常用短语模板列表
+///
+/// @param state 全局应用共享状态
+/// @return 短语列表
+#[tauri::command]
+pub fn get_snippets(state: State<'_, AppState>) -> Result<Vec<Snippet>, String> {
+    state
+        .engine
+        .get_all_snippets()
+        .map_err(|e| format!("获取常用短语失败: {e}"))
+}
+
+/// 保存常用短语模板 (若指定 id 则更新，否则新建)
+///
+/// @param state 全局应用共享状态
+/// @param id 目标短语主键 ID (可选)
+/// @param title 短语标题
+/// @param content 短语模板内容
+/// @param shortcut 快捷缩写
+/// @return 保存后的短语实体
+#[tauri::command]
+pub fn save_snippet(
+    state: State<'_, AppState>,
+    id: Option<i64>,
+    title: String,
+    content: String,
+    shortcut: String,
+) -> Result<Snippet, String> {
+    state
+        .engine
+        .save_snippet(id, &title, &content, &shortcut)
+        .map_err(|e| format!("保存常用短语失败: {e}"))
+}
+
+/// 删除指定常用短语模板
+///
+/// @param state 全局应用共享状态
+/// @param id 短语主键 ID
+/// @return 是否删除成功
+#[tauri::command]
+pub fn delete_snippet(state: State<'_, AppState>, id: i64) -> Result<bool, String> {
+    state
+        .engine
+        .delete_snippet(id)
+        .map_err(|e| format!("删除常用短语失败: {e}"))
+}
+
+/// 检索常用短语模板
+///
+/// @param state 全局应用共享状态
+/// @param query 检索关键词或前缀 (如 "/meet")
+/// @return 匹配的短语列表
+#[tauri::command]
+pub fn search_snippets(
+    state: State<'_, AppState>,
+    query: String,
+) -> Result<Vec<Snippet>, String> {
+    state
+        .engine
+        .search_snippets(&query)
+        .map_err(|e| format!("检索常用短语失败: {e}"))
+}
+
+/// 隐藏悬浮面板并将展开后的短语模板内容回填至前台原活动窗口 (AC-2)
+///
+/// @param app Tauri 应用程序句柄
+/// @param state 全局应用共享状态
+/// @param id 短语主键 ID
+/// @return 展开后的渲染文本
+#[tauri::command]
+pub fn paste_snippet(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<String, String> {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.hide();
+    }
+    thread::sleep(Duration::from_millis(50));
+    state
+        .engine
+        .paste_snippet(id)
+        .map_err(|e| format!("回填常用短语失败: {e}"))
+}
+

@@ -9,8 +9,9 @@ pub mod pal;
 pub mod storage;
 
 use crate::commands::clipboard::{
-    get_history, get_image_detail, hide_window, ocr_image_entry, paste_custom_text, paste_entry,
-    paste_plain_entry, search_history, toggle_pin, transform_and_paste_entry,
+    delete_snippet, get_history, get_image_detail, get_snippets, hide_window, ocr_image_entry,
+    paste_custom_text, paste_entry, paste_plain_entry, paste_snippet, save_snippet,
+    search_history, search_snippets, toggle_pin, transform_and_paste_entry,
 };
 use crate::commands::AppState;
 use crate::engine::ClipboardEngine;
@@ -131,7 +132,12 @@ pub fn run() {
             toggle_pin,
             get_image_detail,
             ocr_image_entry,
-            paste_custom_text
+            paste_custom_text,
+            get_snippets,
+            save_snippet,
+            delete_snippet,
+            search_snippets,
+            paste_snippet
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

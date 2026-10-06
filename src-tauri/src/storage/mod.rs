@@ -34,6 +34,25 @@ pub struct ClipboardEntry {
     pub is_pinned: bool,
 }
 
+/// 常用短语模板实体 (Snippet)
+///
+/// 遵循 CONTEXT.md 领域模型定义，包含标题、内容模板、快捷缩写及时间戳。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Snippet {
+    /// 唯一主键自增 ID
+    pub id: i64,
+    /// 短语标题说明 (如 "今日站会汇报")
+    pub title: String,
+    /// 模板原始内容 (支持包含 {current_date}、{time} 等占位符)
+    pub content: String,
+    /// 快捷命令缩写 (如 "meet"，主检索框输入 /meet 时直接匹配)
+    pub shortcut: String,
+    /// 创建毫秒时间戳
+    pub created_at: i64,
+    /// 最近更新毫秒时间戳
+    pub updated_at: i64,
+}
+
 /// 存储驱动统一契约 (Storage Trait)
 pub trait Storage: Send + Sync {
     /// 插入纯文本条目及检索索引
@@ -127,5 +146,43 @@ pub trait Storage: Send + Sync {
     /// @param max_capacity 非置顶条目最大保留容量 (如 1000)
     /// @return 实际淘汰清理的记录条数
     fn prune_lru(&self, max_capacity: usize) -> Result<usize, StorageError>;
+
+    /// 保存常用短语模板 (若 id 为 Some 则更新，否则新建)
+    ///
+    /// @param id 指定 ID 则更新，None 则新建
+    /// @param title 短语标题
+    /// @param content 短语模板内容
+    /// @param shortcut 快捷缩写
+    /// @return 成功返回持久化后的短语实体
+    fn save_snippet(
+        &self,
+        id: Option<i64>,
+        title: &str,
+        content: &str,
+        shortcut: &str,
+    ) -> Result<Snippet, StorageError>;
+
+    /// 删除指定常用短语模板
+    ///
+    /// @param id 短语主键 ID
+    /// @return 删除成功返回 true，不存在返回 false
+    fn delete_snippet(&self, id: i64) -> Result<bool, StorageError>;
+
+    /// 获取全部常用短语模板列表 (按更新时间倒序)
+    ///
+    /// @return 短语列表，无数据返回空集合
+    fn get_all_snippets(&self) -> Result<Vec<Snippet>, StorageError>;
+
+    /// 根据唯一 ID 查询常用短语
+    ///
+    /// @param id 短语主键 ID
+    /// @return 存在返回 Some(Snippet)，不存在返回 Ok(None)
+    fn get_snippet_by_id(&self, id: i64) -> Result<Option<Snippet>, StorageError>;
+
+    /// 检索常用短语 (支持按前缀快捷缩写或关键词匹配)
+    ///
+    /// @param query 检索词 (如 "/meet" 或 "汇报")
+    /// @return 匹配的短语列表
+    fn search_snippets(&self, query: &str) -> Result<Vec<Snippet>, StorageError>;
 }
 
