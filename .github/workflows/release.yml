@@ -45,7 +45,7 @@ jobs:
             --draft \
             --prerelease=$IS_PRERELEASE
 
-          RELEASE_ID=$(gh release view "${{ github.ref_name }}" --json id -q .id)
+          RELEASE_ID=$(gh release view "${{ github.ref_name }}" --json databaseId -q .databaseId)
           echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
 
   # ============================================================================
@@ -108,6 +108,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           releaseId: ${{ needs.create-draft-release.outputs.release_id }}
+          tagName: ${{ github.ref_name }}
           args: ${{ matrix.args }}
 
   # ============================================================================
@@ -128,9 +129,13 @@ jobs:
           mkdir -p release-assets
           cd release-assets
           gh release download "${{ github.ref_name }}" --dir .
-          sha256sum * > ../checksums.txt
-          cd ..
-          gh release upload "${{ github.ref_name }}" checksums.txt --clobber
+          if ls * 1> /dev/null 2>&1; then
+            sha256sum * > ../checksums.txt
+            cd ..
+            gh release upload "${{ github.ref_name }}" checksums.txt --clobber
+          else
+            cd ..
+          fi
 
       - name: 将 Draft Release 切换为公开正式发布
         env:
