@@ -73,6 +73,17 @@ fn test_tauri_conf_nsis_spec() {
     assert_eq!(header_h, 57, "header.bmp 高度必须为 57px");
     assert_eq!(header_bpp, 24, "header.bmp 色深必须为 24-bit");
 
+    // 4.1 验证安装器与卸载器品牌图标配置存在且文件有效
+    let installer_icon = nsis["installerIcon"].as_str().unwrap_or_default();
+    let uninstaller_icon = nsis["uninstallerIcon"].as_str().unwrap_or_default();
+    let uninstaller_header = nsis["uninstallerHeaderImage"].as_str().unwrap_or_default();
+    assert_eq!(installer_icon, "icons/icon.ico", "installerIcon 必须为 'icons/icon.ico'");
+    assert_eq!(uninstaller_icon, "icons/icon.ico", "uninstallerIcon 必须为 'icons/icon.ico'");
+    assert_eq!(uninstaller_header, "icons/header.bmp", "uninstallerHeaderImage 必须为 'icons/header.bmp'");
+    assert!(Path::new(installer_icon).exists(), "installerIcon 文件必须存在");
+    assert!(Path::new(uninstaller_icon).exists(), "uninstallerIcon 文件必须存在");
+    assert!(Path::new(uninstaller_header).exists(), "uninstallerHeaderImage 文件必须存在");
+
     // 5. 验证 hooks.nsh 及其关键配置宏
     let hooks_file = nsis["installerHooks"].as_str().unwrap_or_default();
     assert!(!hooks_file.is_empty(), "installerHooks 不得为空");
@@ -84,6 +95,7 @@ fn test_tauri_conf_nsis_spec() {
     assert!(hooks_content.contains("MUI_FINISHPAGE_RUN_CHECKED"), "必须配置 MUI_FINISHPAGE_RUN_CHECKED");
     assert!(hooks_content.contains("MUI_FINISHPAGE_TEXT"), "必须配置 MUI_FINISHPAGE_TEXT");
     assert!(hooks_content.contains("MUI_DIRECTORYPAGE_TEXT_DESTINATION"), "必须配置 MUI_DIRECTORYPAGE_TEXT_DESTINATION");
+    assert!(hooks_content.contains("MUI_UNCONFIRMPAGE_TEXT_TOP"), "必须配置 MUI_UNCONFIRMPAGE_TEXT_TOP");
 
     // 6. 验证自定义双语文件 customLanguageFiles
     let custom_langs = &nsis["customLanguageFiles"];
@@ -107,10 +119,14 @@ fn test_tauri_conf_nsis_spec() {
     assert!(zh_content.contains("Alt + V"), "中文完成页必须包含 Alt + V 指引");
     assert!(zh_content.contains("立即运行 Clip (推荐)"), "中文运行提示必须标准地道");
     assert!(zh_content.contains("免管理员权限"), "中文目录提示必须包含免管理员权限安全说明");
+    assert!(zh_content.contains("deleteAppData"), "中文必须配置 deleteAppData 提示默认安全保留");
+    assert!(zh_content.contains("uninstPageTopText"), "中文必须配置 uninstPageTopText");
 
     assert!(en_content.contains("launchClipNow"), "英文语言包必须包含 launchClipNow");
     assert!(en_content.contains("finishPageDescription"), "英文语言包必须包含 finishPageDescription");
     assert!(en_content.contains("Alt + V"), "英文完成页必须包含 Alt + V 指引");
     assert!(en_content.contains("Launch Clip now (Recommended)"), "英文运行提示必须标准");
     assert!(en_content.contains("No Elevation Required"), "英文目录提示必须包含免提权说明");
+    assert!(en_content.contains("deleteAppData"), "英文必须配置 deleteAppData 提示默认安全保留");
+    assert!(en_content.contains("uninstPageTopText"), "英文必须配置 uninstPageTopText");
 }

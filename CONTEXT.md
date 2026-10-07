@@ -126,7 +126,7 @@ _Avoid_: 散列文件, 签名文件
 _Avoid_: 产物重命名, 资产名称
 
 **InstallerBranding**:
-Windows 平台基于 NSIS Modern UI 2 的现代浅色品牌化向导体系，包含中英双语自适应、当前用户免管理员提权（`%LOCALAPPDATA%\Programs\Clip`）真实展开、容量状态指示、全流程品牌位图与完成页快速上手指引。
+Windows 平台基于 NSIS Modern UI 2 的现代浅色品牌化向导体系，包含中英双语自适应、当前用户免管理员提权（`%LOCALAPPDATA%\Programs\Clip`）安全部署、全流程安装与卸载图标绑定（`installerIcon` / `uninstallerIcon` 映射至 `icons/icon.ico`）、顶部与侧边栏浅色位图、完成页防重叠紧凑指引及卸载期默认安全保留用户历史数据库。
 _Avoid_: 安装包美化, 安装脚本, Setup 界面
 
 **AppWindowBranding**:
