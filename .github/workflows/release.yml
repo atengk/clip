@@ -125,20 +125,25 @@ jobs:
       - name: 规范化全平台产物命名并生成 SHA-256 校验和清单
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_REF: ${{ github.ref_name }}
         run: |
-          TAG="${{ github.ref_name }}"
-          VERSION="${TAG#v}"
-          echo "Target Release Version: ${VERSION}"
+          TAG="${TAG_REF}"
+          if [[ "${TAG}" == v* ]]; then
+            VERSION="${TAG#v}"
+          else
+            VERSION=$(jq -r '.version' src-tauri/tauri.conf.json)
+          fi
+          echo "目标发布版本: ${VERSION}"
 
           mkdir -p raw-assets normalized-assets
           cd raw-assets
-          gh release download "$TAG" --dir .
+          gh release download "${TAG}" --dir .
 
           for file in *; do
-            [ -f "$file" ] || continue
+            [ -f "${file}" ] || continue
             target=""
-            case "$file" in
-              *setup.exe|*Setup.exe|*.exe)
+            case "${file}" in
+              *setup.exe|*Setup.exe|*x64*.exe)
                 target="Clip-${VERSION}-Windows-x64-Setup.exe"
                 ;;
               *.msi)
@@ -159,36 +164,39 @@ jobs:
               *.rpm)
                 target="Clip-${VERSION}-Linux-x86_64.rpm"
                 ;;
-              checksums.txt)
-                continue
-                ;;
               *)
-                target="$file"
+                echo "跳过并清理非目标构件: ${file}"
+                gh release delete-asset "${TAG}" "${file}" -y || true
+                continue
                 ;;
             esac
 
-            if [ -n "$target" ]; then
-              echo "Mapping: $file -> $target"
-              cp "$file" "../normalized-assets/$target"
-              if [ "$file" != "$target" ]; then
-                echo "Removing unnormalized asset from draft release: $file"
-                gh release delete-asset "$TAG" "$file" -y || true
-              fi
+            echo "映射产物: ${file} -> ${target}"
+            cp "${file}" "../normalized-assets/${target}"
+            if [ "${file}" != "${target}" ]; then
+              echo "清理未规范命名的历史产物: ${file}"
+              gh release delete-asset "${TAG}" "${file}" -y || true
             fi
           done
 
           cd ../normalized-assets
-          if ls * 1> /dev/null 2>&1; then
-            echo "Compiling checksums.txt across normalized assets..."
-            sha256sum * > checksums.txt
+          shopt -s nullglob
+          normalized_files=(Clip-*)
+          if [ ${#normalized_files[@]} -gt 0 ]; then
+            echo "正在编译全平台规范产物 SHA-256 校验清单..."
+            rm -f checksums.txt
+            sha256sum "${normalized_files[@]}" > checksums.txt
+            echo "执行 SHA-256 清单自检验证..."
             sha256sum -c checksums.txt
-            gh release upload "$TAG" * --clobber
+            echo "已成功校验并生成 ${#normalized_files[@]} 个标准发布包。"
+            gh release upload "${TAG}" * --clobber
           else
-            echo "Warning: No build assets found to normalize."
+            echo "警告: 未找到任何可供规范化的发布产物。"
           fi
 
       - name: 将 Draft Release 切换为公开正式发布
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_REF: ${{ github.ref_name }}
         run: |
-          gh release edit "${{ github.ref_name }}" --draft=false
+          gh release edit "${TAG_REF}" --draft=false
