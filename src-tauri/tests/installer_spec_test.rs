@@ -53,8 +53,25 @@ fn test_tauri_conf_nsis_spec() {
 
     let sidebar_bytes = fs::read(sidebar_path).unwrap();
     let header_bytes = fs::read(header_path).unwrap();
+    assert!(sidebar_bytes.len() >= 54, "sidebar.bmp 字节数必须不小于 54 字节完整文件头");
+    assert!(header_bytes.len() >= 54, "header.bmp 字节数必须不小于 54 字节完整文件头");
     assert_eq!(&sidebar_bytes[0..2], b"BM", "sidebarImage 必须是有效 BMP 图像");
     assert_eq!(&header_bytes[0..2], b"BM", "headerImage 必须是有效 BMP 图像");
+
+    // 严格校验 BMP 头部尺寸与 24 位色深规范 (Issue #17 AC)
+    let sidebar_w = i32::from_le_bytes(sidebar_bytes[18..22].try_into().unwrap());
+    let sidebar_h = i32::from_le_bytes(sidebar_bytes[22..26].try_into().unwrap());
+    let sidebar_bpp = u16::from_le_bytes(sidebar_bytes[28..30].try_into().unwrap());
+    assert_eq!(sidebar_w, 164, "sidebar.bmp 宽度必须为 164px");
+    assert_eq!(sidebar_h, 314, "sidebar.bmp 高度必须为 314px");
+    assert_eq!(sidebar_bpp, 24, "sidebar.bmp 色深必须为 24-bit");
+
+    let header_w = i32::from_le_bytes(header_bytes[18..22].try_into().unwrap());
+    let header_h = i32::from_le_bytes(header_bytes[22..26].try_into().unwrap());
+    let header_bpp = u16::from_le_bytes(header_bytes[28..30].try_into().unwrap());
+    assert_eq!(header_w, 150, "header.bmp 宽度必须为 150px");
+    assert_eq!(header_h, 57, "header.bmp 高度必须为 57px");
+    assert_eq!(header_bpp, 24, "header.bmp 色深必须为 24-bit");
 
     // 5. 验证 hooks.nsh 及其关键配置宏
     let hooks_file = nsis["installerHooks"].as_str().unwrap_or_default();
