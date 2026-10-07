@@ -12,19 +12,6 @@ _Avoid_: 记录, 剪切项, 数据片
 剪贴板条目的数据载荷分类，对外呈现实用六大流线筛选维度：全部（All）、置顶（Pinned）、文本（Text）、图片（Image）、代码（Code，涵盖 JSON/YAML/HTML/SQL/脚本）、链接（Link）。
 _Avoid_: 格式, 种类
 
-**InstallerBranding**:
-基于 NSIS Modern UI 2 规范定制的高清浅色侧边栏与顶部导航品牌位图、中英双语自适应及免提权安装环境套件。
-_Avoid_: 安装包皮肤, 美化补丁
-
-**AppWindowBranding**:
-基于 Raycast / Spotlight 流线型单栏、可折叠即时预览抽屉、可视化动作清洗面板与清透浅色毛玻璃材质的无边框剪贴板悬浮主窗口设计体系。
-_Avoid_: 主题皮肤, 弹窗样式
-
-**LogoBranding**:
-基于现代拟物剪贴板（Layered Clipboard - 靛蓝紫底板、双层白纸卡片与金属银夹扣）的跨平台多分辨率矢量品牌标识母版体系。
-_Avoid_: 软件图标, 临时图标
-
-
 **Paste Simulator**:
 在检索悬浮窗隐藏后，负责将目标条目注入系统剪贴板并向上一个获得焦点的活动窗口发送模拟按键（如 `Ctrl + V` 或 `Cmd + V`）的核心服务。
 _Avoid_: 自动填表, 注入器
