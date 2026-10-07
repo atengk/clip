@@ -55,9 +55,13 @@
       "nsis": {
         "installMode": "currentUser",
         "languages": [
-          "SimpChinese",
-          "English"
+          "English",
+          "SimpChinese"
         ],
+        "customLanguageFiles": {
+          "English": "windows/en.nsh",
+          "SimpChinese": "windows/zh-CN.nsh"
+        },
         "sidebarImage": "icons/sidebar.bmp",
         "headerImage": "icons/header.bmp",
         "installerHooks": "windows/hooks.nsh"
