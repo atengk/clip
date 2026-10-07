@@ -1663,6 +1663,38 @@ kbd {
   font-weight: 600;
 }
 
+/* 纯 CSS 状态微光指示小圆标 (彻底根除跨平台 Emoji 渲染方块乱码) */
+.status-indicator-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background-color: #94a3b8;
+  margin-right: 6px;
+  vertical-align: middle;
+  transition: background-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.status-indicator-dot.active {
+  background-color: #10b981;
+  box-shadow: 0 0 6px rgba(16, 185, 129, 0.5);
+}
+
+/* 明确阻断交互元素受 Windows 非客户区拖拽 (HTCAPTION) 拦截与重绘闪烁 */
+.search-wrapper,
+.header-controls,
+.filter-chips,
+.header-action-btn,
+.segmented-btn,
+.filter-chip,
+.settings-modal,
+.settings-body,
+.form-group,
+.shortcut-record-input {
+  app-region: no-drag;
+  -webkit-app-region: no-drag;
+}
+
 /* -------------------------------------------------------------------------- */
 /* 连贴模式右下角胶囊 HUD (Capsule HUD)                                        */
 /* -------------------------------------------------------------------------- */

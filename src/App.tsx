@@ -9,6 +9,7 @@
 import React, { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { maskSensitiveContent } from "./utils/privacy";
 import "./App.css";
@@ -251,7 +252,78 @@ function analyzeContent(content: string, isImage: boolean, isSnippet: boolean, s
   return { kind: "text", title: firstLine.length > 36 ? firstLine.slice(0, 36) + "..." : firstLine || "纯文本记录" };
 }
 
-export const App: React.FC = () => {
+/**
+ * 独立 HUD 胶囊悬浮窗口
+ * 彻底物理隔离于主程序之外，杜绝全量数据拉取、DOM/窗口失焦监听与事件死循环
+ */
+const StandaloneHudView: React.FC = () => {
+  const [queueStatus, setQueueStatus] = useState<QueueStatus>({
+    is_active: false,
+    count: 0,
+    items: [],
+  });
+
+  useEffect(() => {
+    invoke<QueueStatus>("get_paste_queue_status")
+      .then(setQueueStatus)
+      .catch((err) => console.error("获取连贴状态失败:", err));
+
+    const unlistenQueue = listen<QueueStatus>("paste-queue-changed", (event) => {
+      setQueueStatus(event.payload);
+    });
+
+    return () => {
+      unlistenQueue.then((f) => f());
+    };
+  }, []);
+
+  const handlePasteQueuePop = useCallback(async () => {
+    try {
+      await invoke("paste_queue_pop");
+    } catch (err) {
+      console.error("连贴回填失败:", err);
+    }
+  }, []);
+
+  const handleStopPasteQueue = useCallback(async () => {
+    try {
+      await invoke("stop_paste_queue");
+    } catch (err) {
+      console.error("停止连贴队列失败:", err);
+    }
+  }, []);
+
+  return (
+    <div className="capsule-hud-standalone">
+      <div className="capsule-hud-main">
+        <div className="capsule-hud-header">
+          <span className="capsule-pulse-dot" />
+          <span className="capsule-hud-title">📥 连贴模式</span>
+          <span className="capsule-hud-count">{queueStatus.count} 项</span>
+        </div>
+        <div className="capsule-hud-sub">
+          {queueStatus.count > 0 ? (
+            <span>目标窗口连按 <kbd>Ctrl+V</kbd> 依次回填 (FIFO)</span>
+          ) : (
+            <span>等待复制入队，清空自动退出</span>
+          )}
+        </div>
+      </div>
+      <div className="capsule-hud-buttons">
+        {queueStatus.count > 0 && (
+          <button className="capsule-action-btn pop" onClick={handlePasteQueuePop} title="手动回填下一项">
+            回填
+          </button>
+        )}
+        <button className="capsule-action-btn stop" onClick={handleStopPasteQueue} title="退出连贴模式 (Alt+Shift+C)">
+          退出
+        </button>
+      </div>
+    </div>
+  );
+};
+
+const MainPanel: React.FC = () => {
   const [activeTab, setActiveTab] = useState<ActiveTab>("history");
   const [filterCategory, setFilterCategory] = useState<FilterCategory>("all");
   const [query, setQuery] = useState<string>("");
@@ -320,6 +392,27 @@ export const App: React.FC = () => {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const revealTimerRef = useRef<number | null>(null);
+
+  // 状态镜像 Ref：供单例事件监听器与操作系统失焦回调无延迟同步读取，杜绝依赖项变更导致的重绑风暴
+  const isPinnedRef = useRef(isPinned);
+  useEffect(() => {
+    isPinnedRef.current = isPinned;
+  }, [isPinned]);
+
+  const autoHideOnBlurRef = useRef(autoHideOnBlur);
+  useEffect(() => {
+    autoHideOnBlurRef.current = autoHideOnBlur;
+  }, [autoHideOnBlur]);
+
+  const activeTabRef = useRef(activeTab);
+  useEffect(() => {
+    activeTabRef.current = activeTab;
+  }, [activeTab]);
+
+  const queryRef = useRef(query);
+  useEffect(() => {
+    queryRef.current = query;
+  }, [query]);
 
   /**
    * 加载数据并生成统一直观展示模型
@@ -531,23 +624,6 @@ export const App: React.FC = () => {
       setQueueStatus(status);
     } catch (err) {
       console.error("切换连贴模式失败:", err);
-    }
-  }, []);
-
-  const handleStopPasteQueue = useCallback(async () => {
-    try {
-      const status = await invoke<QueueStatus>("clear_paste_queue");
-      setQueueStatus(status);
-    } catch (err) {
-      console.error("停止连贴模式失败:", err);
-    }
-  }, []);
-
-  const handlePasteQueuePop = useCallback(async () => {
-    try {
-      await invoke("paste_queue_pop");
-    } catch (err) {
-      console.error("连贴出队回填失败:", err);
     }
   }, []);
 
@@ -941,9 +1017,9 @@ export const App: React.FC = () => {
     inputRef.current?.focus();
   };
 
-  // 监听后端广播事件与窗口唤起
+  // 监听后端广播事件与原生窗口级焦点生命周期 (初始化单次注册，杜绝依赖项变更导致的频繁解绑与闪烁风暴)
   useEffect(() => {
-    loadData(activeTab, "");
+    loadData("history", "");
 
     invoke<QueueStatus>("get_paste_queue_status")
       .then(setQueueStatus)
@@ -958,7 +1034,7 @@ export const App: React.FC = () => {
       .catch((err) => console.error("获取自启配置失败:", err));
 
     const unlistenClipboard = listen<ClipboardEntry>("clipboard-changed", () => {
-      loadData(activeTab, query);
+      loadData(activeTabRef.current, queryRef.current);
     });
 
     const unlistenQueue = listen<QueueStatus>("paste-queue-changed", (event) => {
@@ -970,7 +1046,7 @@ export const App: React.FC = () => {
     });
 
     const unlistenRestored = listen("data-restored", () => {
-      loadData(activeTab, query);
+      loadData(activeTabRef.current, queryRef.current);
     });
 
     const unlistenPanelShown = listen("panel-shown", () => {
@@ -1003,13 +1079,16 @@ export const App: React.FC = () => {
       setShortcutDraft(event.payload);
     });
 
-    const handleBlur = () => {
-      if (isPinned || !autoHideOnBlur) {
-        return;
+    // 原生操作系统级窗口焦点监听：仅当系统窗口真正失去焦点 (点击外部程序/桌面) 时判定，彻底杜绝 DOM 内部切换按钮与输入框导致的误关
+    const appWin = getCurrentWebviewWindow();
+    const unlistenFocus = appWin.onFocusChanged(({ payload: focused }) => {
+      if (!focused) {
+        if (isPinnedRef.current || !autoHideOnBlurRef.current) {
+          return;
+        }
+        handleClose();
       }
-      handleClose();
-    };
-    window.addEventListener("blur", handleBlur);
+    });
 
     return () => {
       unlistenClipboard.then((f) => f());
@@ -1018,9 +1097,9 @@ export const App: React.FC = () => {
       unlistenRestored.then((f) => f());
       unlistenPanelShown.then((f) => f());
       unlistenShortcutChanged.then((f) => f());
-      window.removeEventListener("blur", handleBlur);
+      unlistenFocus.then((f) => f());
     };
-  }, [loadData, activeTab, query, handleClose, isPinned, autoHideOnBlur]);
+  }, [loadData, handleClose]);
 
   // 全局键盘导航流闭环 (Issue #15)
   useEffect(() => {
@@ -1272,39 +1351,6 @@ export const App: React.FC = () => {
     executeAction,
   ]);
 
-  // 独立 HUD 视图模式 (连贴胶囊浮窗)
-  const isHudView = typeof window !== "undefined" && window.location.search.includes("view=hud");
-  if (isHudView) {
-    return (
-      <div className="capsule-hud-standalone">
-        <div className="capsule-hud-main">
-          <div className="capsule-hud-header">
-            <span className="capsule-pulse-dot" />
-            <span className="capsule-hud-title">📥 连贴模式</span>
-            <span className="capsule-hud-count">{queueStatus.count} 项</span>
-          </div>
-          <div className="capsule-hud-sub">
-            {queueStatus.count > 0 ? (
-              <span>目标窗口连按 <kbd>Ctrl+V</kbd> 依次回填 (FIFO)</span>
-            ) : (
-              <span>等待复制入队，清空自动退出</span>
-            )}
-          </div>
-        </div>
-        <div className="capsule-hud-buttons">
-          {queueStatus.count > 0 && (
-            <button className="capsule-action-btn pop" onClick={handlePasteQueuePop} title="手动回填下一项">
-              回填
-            </button>
-          )}
-          <button className="capsule-action-btn stop" onClick={handleStopPasteQueue} title="退出连贴模式 (Alt+Shift+C)">
-            退出
-          </button>
-        </div>
-      </div>
-    );
-  }
-
   // 当前选中的项
   const selectedItem = displayItems[selectedIndex];
 
@@ -1316,7 +1362,7 @@ export const App: React.FC = () => {
       <header className="panel-header-compact" data-tauri-drag-region>
         {/* Row 1: 整合搜索栏、模式切换胶囊与工具入口 (44px) */}
         <div className="header-row-1">
-          <div className="search-wrapper">
+          <div className="search-wrapper" data-tauri-drag-region="false">
             <span className="search-icon">🔍</span>
             <input
               ref={inputRef}
@@ -1346,7 +1392,7 @@ export const App: React.FC = () => {
             )}
           </div>
 
-          <div className="header-controls">
+          <div className="header-controls" data-tauri-drag-region="false">
             {/* 分段模式胶囊 */}
             <div className="segmented-pill">
               <button
@@ -1411,7 +1457,7 @@ export const App: React.FC = () => {
         </div>
 
         {/* Row 2: 6 流线型分类过滤栏与简洁统计提示 (34px) */}
-        <div className="header-row-2">
+        <div className="header-row-2" data-tauri-drag-region="false">
           {activeTab === "history" ? (
             <div className="filter-chips">
               <button
@@ -2113,7 +2159,7 @@ export const App: React.FC = () => {
 
               {/* 2. 窗口行为与固定置顶 (WindowPinning) */}
               <div className="settings-section">
-                <div className="settings-section-title">🪟 窗口交互行为</div>
+                <div className="settings-section-title">🖥️ 窗口交互行为</div>
                 <div className="settings-row">
                   <div className="settings-label-group">
                     <span className="settings-label">失去焦点时自动隐藏窗口</span>
@@ -2131,9 +2177,10 @@ export const App: React.FC = () => {
                   <div className="settings-label-group">
                     <span className="settings-label">窗口钉住/保持固定 (Alt+P)</span>
                     <span className="settings-desc">
+                      <span className={`status-indicator-dot ${isPinned ? "active" : ""}`} />
                       {isPinned
-                        ? "🟢 当前已处于固定状态，点击任何外部程序窗口均常驻不消失"
-                        : "⚪ 未固定，窗口将在失焦时根据上方规则收起"}
+                        ? "当前已处于固定状态，点击任何外部程序窗口均常驻不消失"
+                        : "未固定，窗口将在失焦时根据上方规则收起"}
                     </span>
                   </div>
                   <button
@@ -2160,7 +2207,8 @@ export const App: React.FC = () => {
                   <div className="settings-label-group">
                     <span className="settings-label">无痕私密模式</span>
                     <span className="settings-desc">
-                      {incognitoStatus.is_active ? "🟢 当前无痕模式已启用，暂停记录所有新剪贴内容" : "⚪ 未开启，正常记录剪贴历史"}
+                      <span className={`status-indicator-dot ${incognitoStatus.is_active ? "active" : ""}`} />
+                      {incognitoStatus.is_active ? "当前无痕模式已启用，暂停记录所有新剪贴内容" : "未开启，正常记录剪贴历史"}
                     </span>
                   </div>
                   <button
@@ -2212,6 +2260,17 @@ export const App: React.FC = () => {
       )}
     </div>
   );
+};
+
+/**
+ * 根组件：物理分流独立 HUD 胶囊视图与主程序面板
+ */
+export const App: React.FC = () => {
+  const isHudView = typeof window !== "undefined" && window.location.search.includes("view=hud");
+  if (isHudView) {
+    return <StandaloneHudView />;
+  }
+  return <MainPanel />;
 };
 
 export default App;
