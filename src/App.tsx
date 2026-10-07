@@ -14,6 +14,11 @@ import { maskSensitiveContent } from "./utils/privacy";
 import "./App.css";
 
 /**
+ * 敏感凭据临时显隐超时毫秒数
+ */
+const SENSITIVE_REVEAL_TIMEOUT_MS = 3000;
+
+/**
  * 剪贴板条目数据结构 (遵循 CONTEXT.md)
  */
 export interface ClipboardEntry {
@@ -88,6 +93,18 @@ export type FilterCategory = "all" | "pinned" | "text" | "image" | "code" | "lin
  * 自动识别项分类
  */
 export type DetectedKind = "text" | "sensitive" | "code" | "link" | "image" | "snippet";
+
+/**
+ * 分类中文映射表 (消除未转译英文枚举泄漏)
+ */
+export const KIND_NAMES: Record<DetectedKind, string> = {
+  text: "纯文本",
+  sensitive: "脱敏防窥",
+  code: "代码片段",
+  link: "外链地址",
+  image: "位图图像",
+  snippet: "常用短语",
+};
 
 /**
  * 列表统一直观展示项模型
@@ -287,6 +304,7 @@ export const App: React.FC = () => {
   const inputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const revealTimerRef = useRef<number | null>(null);
 
   /**
    * 加载数据并生成统一直观展示模型
@@ -449,6 +467,20 @@ export const App: React.FC = () => {
       console.error("回填常用短语失败:", err);
     }
   }, []);
+
+  /**
+   * 统一粘贴分发器 (消除 Duplicated Code 坏味道)
+   */
+  const handleDispatchPaste = useCallback(
+    (item: DisplayItem) => {
+      if (item.isSnippet) {
+        handlePasteSnippet(item.id);
+      } else {
+        handlePaste(item.id);
+      }
+    },
+    [handlePaste, handlePasteSnippet]
+  );
 
   /**
    * 切换单个条目的多选勾选状态
@@ -733,13 +765,26 @@ export const App: React.FC = () => {
   }, []);
 
   /**
-   * 敏感凭据 3 秒临时显露明文
+   * 敏感凭据 3 秒临时显露明文 (带定时器安全管理与行内直达)
    */
   const handleRevealSensitive = useCallback((id: number) => {
+    if (revealTimerRef.current !== null) {
+      window.clearTimeout(revealTimerRef.current);
+    }
     setTemporaryRevealId(id);
-    setTimeout(() => {
+    revealTimerRef.current = window.setTimeout(() => {
       setTemporaryRevealId((prev) => (prev === id ? null : prev));
-    }, 3000);
+      revealTimerRef.current = null;
+    }, SENSITIVE_REVEAL_TIMEOUT_MS);
+  }, []);
+
+  // 卸载时清理定时器，杜绝异步内存泄漏
+  useEffect(() => {
+    return () => {
+      if (revealTimerRef.current !== null) {
+        window.clearTimeout(revealTimerRef.current);
+      }
+    };
   }, []);
 
   /**
@@ -895,7 +940,7 @@ export const App: React.FC = () => {
         if (e.key === "Enter") {
           e.preventDefault();
           const current = displayItems[selectedIndex];
-          if (current) handlePaste(current.id);
+          if (current) handleDispatchPaste(current);
           return;
         }
         return;
@@ -986,9 +1031,9 @@ export const App: React.FC = () => {
         return;
       }
 
-      // Space 键: 展开/收起右侧即时抽屉检查器 (Quick Look Drawer)
+      // Space 键: 仅在非输入框打字状态下展开/收起右侧抽屉，杜绝误拦截首位空格
       const isInputFocused = document.activeElement === inputRef.current;
-      const isSpaceTrigger = (e.key === " " && (!isInputFocused || query.length === 0)) || (e.altKey && e.key === " ");
+      const isSpaceTrigger = (e.key === " " && !isInputFocused) || (e.altKey && e.key === " ");
       if (isSpaceTrigger) {
         e.preventDefault();
         setDrawerOpen((prev) => !prev);
@@ -1006,11 +1051,7 @@ export const App: React.FC = () => {
         const targetItem = displayItems[num - 1];
         if (targetItem) {
           e.preventDefault();
-          if (targetItem.isSnippet) {
-            handlePasteSnippet(targetItem.id);
-          } else {
-            handlePaste(targetItem.id);
-          }
+          handleDispatchPaste(targetItem);
           return;
         }
       }
@@ -1060,11 +1101,7 @@ export const App: React.FC = () => {
         e.preventDefault();
         const current = displayItems[selectedIndex];
         if (current) {
-          if (current.isSnippet) {
-            handlePasteSnippet(current.id);
-          } else {
-            handlePaste(current.id);
-          }
+          handleDispatchPaste(current);
         }
       }
     };
@@ -1084,8 +1121,8 @@ export const App: React.FC = () => {
     settingsModalOpen,
     handleClose,
     handlePaste,
-    handlePasteSnippet,
     handlePasteMultiple,
+    handleDispatchPaste,
     handleTransformAndPaste,
     handleTogglePin,
     handleOpenCreateSnippet,
@@ -1219,10 +1256,10 @@ export const App: React.FC = () => {
             <button
               className={`header-action-btn ${incognitoStatus.is_active ? "active" : ""}`}
               onClick={() => handleToggleIncognito()}
-              title="切换隐私无痕模式"
+              title={incognitoStatus.is_active ? "已暂停记录，点击退出无痕" : "切换隐私无痕模式"}
             >
               <span>🕵️</span>
-              <span>{incognitoStatus.is_active ? "无痕" : ""}</span>
+              <span>{incognitoStatus.is_active ? "无痕中" : "无痕"}</span>
             </button>
 
             {/* 设置按钮 */}
@@ -1238,21 +1275,6 @@ export const App: React.FC = () => {
             </button>
           </div>
         </div>
-
-        {/* 隐身模式活跃提醒横幅 */}
-        {incognitoStatus.is_active && (
-          <div className="incognito-banner">
-            <div className="incognito-banner-info">
-              <span>🕵️ 隐私无痕模式进行中：已暂停捕获剪贴板记录</span>
-              {incognitoStatus.remaining_seconds && (
-                <span>(剩余约 {Math.ceil(incognitoStatus.remaining_seconds / 60)} 分钟)</span>
-              )}
-            </div>
-            <button className="incognito-banner-btn" onClick={() => handleToggleIncognito()}>
-              退出无痕
-            </button>
-          </div>
-        )}
 
         {/* Row 2: 6 流线型分类过滤栏与简洁统计提示 (34px) */}
         <div className="header-row-2">
@@ -1342,23 +1364,20 @@ export const App: React.FC = () => {
               // 确定 28×28 槽位样式与图标
               let slotClass = "slot-text";
               let slotIcon: React.ReactNode = "📄";
-              let badgeLabel = "文本";
+              let badgeLabel = KIND_NAMES[item.kind];
               let badgeClass = "";
 
               if (item.kind === "sensitive") {
                 slotClass = "slot-sensitive";
                 slotIcon = "🛡️";
-                badgeLabel = "防窥";
                 badgeClass = "badge-sensitive";
               } else if (item.kind === "code") {
                 slotClass = "slot-code";
                 slotIcon = "</>";
-                badgeLabel = "代码";
                 badgeClass = "badge-code";
               } else if (item.kind === "link") {
                 slotClass = "slot-link";
                 slotIcon = "🔗";
-                badgeLabel = "链接";
                 badgeClass = "badge-link";
               } else if (item.kind === "image") {
                 slotClass = "slot-image";
@@ -1368,12 +1387,10 @@ export const App: React.FC = () => {
                 ) : (
                   "🖼️"
                 );
-                badgeLabel = "图片";
                 badgeClass = "badge-image";
               } else if (item.kind === "snippet") {
                 slotClass = "slot-snippet";
                 slotIcon = "⚡";
-                badgeLabel = "短语";
                 badgeClass = "badge-snippet";
               }
 
@@ -1389,11 +1406,7 @@ export const App: React.FC = () => {
                     } else if (selectedIds.length > 0) {
                       handleToggleSelectItem(item.id, e);
                     } else {
-                      if (item.isSnippet) {
-                        handlePasteSnippet(item.id);
-                      } else {
-                        handlePaste(item.id);
-                      }
+                      handleDispatchPaste(item);
                     }
                   }}
                   onMouseEnter={() => setSelectedIndex(index)}
@@ -1427,6 +1440,19 @@ export const App: React.FC = () => {
                         <span className={`item-badge-type ${badgeClass}`}>{badgeLabel}</span>
                         {item.shortcut && <span className="item-badge-type">/{item.shortcut}</span>}
                         {item.is_pinned && <span className="item-pin-star" title="已置顶">★</span>}
+                        {isSensitive && (
+                          <button
+                            type="button"
+                            className="slot-reveal-btn"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleRevealSensitive(item.id);
+                            }}
+                            title="点击临时显露明文 (3秒自隐)"
+                          >
+                            {isTemporarilyRevealed ? "👁️ 显隐中" : "🔒 防窥"}
+                          </button>
+                        )}
                       </div>
                       <div className="item-snippet-snippet">
                         {item.kind === "image"
@@ -1459,11 +1485,7 @@ export const App: React.FC = () => {
                         className="quick-action-btn primary"
                         onClick={(e) => {
                           e.stopPropagation();
-                          if (item.isSnippet) {
-                            handlePasteSnippet(item.id);
-                          } else {
-                            handlePaste(item.id);
-                          }
+                          handleDispatchPaste(item);
                         }}
                         title="立即回填粘贴到当前活动窗口 (Enter)"
                       >
@@ -1486,7 +1508,7 @@ export const App: React.FC = () => {
               <div className="drawer-header">
                 <div className="drawer-title-group">
                   <span className="drawer-title">{selectedItem.title}</span>
-                  <span className="item-badge-type">{selectedItem.kind.toUpperCase()}</span>
+                  <span className="item-badge-type">{KIND_NAMES[selectedItem.kind]}</span>
                 </div>
                 <button
                   className="drawer-close-btn"
@@ -1553,7 +1575,7 @@ export const App: React.FC = () => {
                 {/* 敏感信息防窥深度预览 */}
                 {selectedItem.kind === "sensitive" && (
                   <div className="drawer-sensitive-card">
-                    <div style={{ fontWeight: 600, color: "#92400e" }}>🔒 敏感信息防护</div>
+                    <div className="drawer-section-title amber">🔒 敏感信息防护</div>
                     <pre className="drawer-text-block">
                       {temporaryRevealId === selectedItem.id
                         ? selectedItem.content
@@ -1605,7 +1627,7 @@ export const App: React.FC = () => {
                 {/* 常用短语模板预览 */}
                 {selectedItem.kind === "snippet" && (
                   <div className="drawer-template-card">
-                    <div style={{ fontWeight: 600, color: "#6b21a8" }}>⚡ 动态变量解析</div>
+                    <div className="drawer-section-title purple">⚡ 动态变量解析</div>
                     <pre className="drawer-text-block">{selectedItem.content}</pre>
                     <div className="drawer-actions-bar">
                       {selectedItem.rawSnippet && (
@@ -1642,13 +1664,7 @@ export const App: React.FC = () => {
               </span>
               <button
                 className="quick-action-btn primary"
-                onClick={() => {
-                  if (selectedItem.isSnippet) {
-                    handlePasteSnippet(selectedItem.id);
-                  } else {
-                    handlePaste(selectedItem.id);
-                  }
-                }}
+                onClick={() => handleDispatchPaste(selectedItem)}
               >
                 ↵ 粘贴 (Enter)
               </button>
@@ -1663,7 +1679,9 @@ export const App: React.FC = () => {
       <footer className="panel-footer-bar">
         <div className="footer-left">
           <span className="status-dot" />
-          <span style={{ fontWeight: 500 }}>监听就绪</span>
+          <span style={{ fontWeight: 500 }}>
+            {incognitoStatus.is_active ? "🕵️ 隐身无痕进行中" : "监听就绪"}
+          </span>
           <span style={{ color: "#cbd5e1" }}>|</span>
           <button
             className={`queue-pill-btn ${queueStatus.is_active ? "active" : ""}`}
@@ -1782,12 +1800,12 @@ export const App: React.FC = () => {
                 ✕
               </button>
             </div>
-            <div className="image-preview-body" style={{ padding: 16, textAlign: "center" }}>
+            <div className="image-preview-modal-body">
               {imageDetails[selectedItem.content] && (
                 <img
                   src={imageDetails[selectedItem.content].data_url}
                   alt="大图预览"
-                  style={{ maxWidth: "100%", maxHeight: "60vh", borderRadius: 8 }}
+                  className="image-preview-modal-img"
                 />
               )}
             </div>
@@ -1859,6 +1877,15 @@ export const App: React.FC = () => {
                   </button>
                   <button type="button" className="ph-btn" onClick={() => insertPlaceholder("{clipboard}")}>
                     + &#123;clipboard&#125;
+                  </button>
+                  <button type="button" className="ph-btn" onClick={() => insertPlaceholder("{year}")}>
+                    + &#123;year&#125;
+                  </button>
+                  <button type="button" className="ph-btn" onClick={() => insertPlaceholder("{month}")}>
+                    + &#123;month&#125;
+                  </button>
+                  <button type="button" className="ph-btn" onClick={() => insertPlaceholder("{day}")}>
+                    + &#123;day&#125;
                   </button>
                 </div>
                 <textarea

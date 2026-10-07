@@ -822,6 +822,44 @@ kbd {
   gap: 8px;
 }
 
+.drawer-section-title {
+  font-weight: 600;
+  font-size: 11px;
+}
+
+.drawer-section-title.amber {
+  color: #92400e;
+}
+
+.drawer-section-title.purple {
+  color: #6b21a8;
+}
+
+.image-preview-modal-body {
+  padding: 16px;
+  text-align: center;
+}
+
+.image-preview-modal-img {
+  max-width: 100%;
+  max-height: 60vh;
+  border-radius: 8px;
+}
+
+.slot-reveal-btn {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 1px 4px;
+  font-size: 10px;
+  border-radius: 4px;
+  transition: background 0.15s ease;
+}
+
+.slot-reveal-btn:hover {
+  background: #fde68a;
+}
+
 .drawer-template-card {
   background: #faf5ff;
   border: 1px solid #e9d5ff;
