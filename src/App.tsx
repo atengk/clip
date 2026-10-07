@@ -1,20 +1,22 @@
 /**
- * 悬浮剪贴板历史面板，集成拼音模糊搜索框、置顶管理、超大文本熔断标注与失焦自隐。
+ * Clip - 桌面悬浮剪贴板历史管理器
+ * 人机工效精修版：浅色 Acrylic 视觉、二层紧凑头部、严格 28×28 槽位对齐与键盘流原生闭环。
  *
  * @author Ateng
- * @since 2026-10-06
+ * @since 2026-10-07
  */
 
-import React, { useEffect, useState, useCallback, useRef } from "react";
+import React, { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { maskSensitiveContent } from "./utils/privacy";
 import "./App.css";
 
 /**
  * 剪贴板条目数据结构 (遵循 CONTEXT.md)
  */
-interface ClipboardEntry {
+export interface ClipboardEntry {
   id: number;
   content: string;
   entry_type: string;
@@ -23,7 +25,7 @@ interface ClipboardEntry {
 }
 
 /**
- * 常用短语实体模型 (遵循 CONTEXT.md 与工单 #8)
+ * 常用短语实体模型 (遵循 CONTEXT.md)
  */
 export interface Snippet {
   id: number;
@@ -35,7 +37,7 @@ export interface Snippet {
 }
 
 /**
- * 队列连贴单项数据结构 (工单 #9)
+ * 队列连贴单项数据结构
  */
 export interface QueueItem {
   id: number;
@@ -44,7 +46,7 @@ export interface QueueItem {
 }
 
 /**
- * 队列连贴当前全局状态视图 (工单 #9)
+ * 队列连贴当前全局状态视图
  */
 export interface QueueStatus {
   is_active: boolean;
@@ -53,7 +55,7 @@ export interface QueueStatus {
 }
 
 /**
- * 隐身无痕模式状态快照 (工单 #10)
+ * 隐身无痕模式状态快照
  */
 export interface IncognitoStatus {
   is_active: boolean;
@@ -62,7 +64,7 @@ export interface IncognitoStatus {
 }
 
 /**
- * 灾备归档元数据清单 (工单 #10)
+ * 灾备归档元数据清单
  */
 export interface BackupManifest {
   version: string;
@@ -78,17 +80,28 @@ export interface BackupManifest {
 export type ActiveTab = "history" | "snippets";
 
 /**
+ * 6 大流线型分类过滤类型
+ */
+export type FilterCategory = "all" | "pinned" | "text" | "image" | "code" | "link";
+
+/**
+ * 自动识别项分类
+ */
+export type DetectedKind = "text" | "sensitive" | "code" | "link" | "image" | "snippet";
+
+/**
  * 列表统一直观展示项模型
  */
 export interface DisplayItem {
   id: number;
   isSnippet: boolean;
   content: string;
-  title?: string;
+  title: string;
   shortcut?: string;
-  entry_type: string; // "text" | "image" | "snippet"
+  entry_type: string;
   created_at: number;
   is_pinned: boolean;
+  kind: DetectedKind;
   rawSnippet?: Snippet;
   rawEntry?: ClipboardEntry;
 }
@@ -114,8 +127,18 @@ function formatBytes(bytes: number): string {
   return `${(bytes / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`;
 }
 
-/** 2MB 字节/字符阈值，用于前端展示超大文本标签与长字符串 DOM 裁剪保护 */
-const LARGE_TEXT_THRESHOLD = 2 * 1024 * 1024;
+/**
+ * 人性化相对时间显示函数
+ */
+function formatRelativeTime(timestampMs: number): string {
+  const now = Date.now();
+  const diffSec = Math.max(0, Math.floor((now - timestampMs) / 1000));
+  if (diffSec < 60) return "刚刚";
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)}分钟前`;
+  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}小时前`;
+  if (diffSec < 172800) return "昨天";
+  return `${Math.floor(diffSec / 86400)}天前`;
+}
 
 /**
  * 支持的格式清洗与转换动作类型枚举
@@ -131,9 +154,6 @@ export type ActionKey =
   | "json_minify"
   | "ocr";
 
-/**
- * 文本清洗与格式转换动作项定义
- */
 interface ActionItem {
   key: ActionKey;
   label: string;
@@ -157,12 +177,73 @@ const IMAGE_ACTIONS: ActionItem[] = [
   { key: "ocr", label: "提取文字 (OCR)", description: "利用系统原生离线 OCR 识别中英文字符", icon: "🔍", hotkey: "1" },
 ];
 
+/**
+ * 根据内容智能识别条目分类与默认展示标题
+ */
+function analyzeContent(content: string, isImage: boolean, isSnippet: boolean, snippetTitle?: string): { kind: DetectedKind; title: string } {
+  if (isSnippet) {
+    return { kind: "snippet", title: snippetTitle || "常用短语模板" };
+  }
+  if (isImage) {
+    return { kind: "image", title: "屏幕截屏 / 位图图像" };
+  }
+  const { isSensitive } = maskSensitiveContent(content);
+  if (isSensitive) {
+    return { kind: "sensitive", title: "敏感信息 (脱敏防窥保护)" };
+  }
+  const trimmed = content.trim();
+  if (/^https?:\/\/[^\s]+$/i.test(trimmed)) {
+    try {
+      const url = new URL(trimmed);
+      return { kind: "link", title: `外链: ${url.hostname}` };
+    } catch {
+      return { kind: "link", title: "外链地址 (URL)" };
+    }
+  }
+  if (
+    trimmed.startsWith("{") ||
+    trimmed.startsWith("[") ||
+    trimmed.startsWith("<!DOCTYPE") ||
+    trimmed.startsWith("<html") ||
+    trimmed.startsWith("SELECT ") ||
+    trimmed.startsWith("CREATE ") ||
+    trimmed.startsWith("import ") ||
+    trimmed.startsWith("export ") ||
+    trimmed.startsWith("const ") ||
+    trimmed.startsWith("let ") ||
+    trimmed.startsWith("def ") ||
+    trimmed.startsWith("fn ") ||
+    trimmed.startsWith("class ") ||
+    trimmed.startsWith("curl ") ||
+    trimmed.startsWith("git ") ||
+    trimmed.includes("=>") ||
+    trimmed.includes("function")
+  ) {
+    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+      return { kind: "code", title: "JSON 数据结构" };
+    }
+    if (trimmed.startsWith("SELECT ") || trimmed.startsWith("CREATE ")) {
+      return { kind: "code", title: "SQL 查询脚本" };
+    }
+    if (trimmed.startsWith("git ")) {
+      return { kind: "code", title: "Git 终端指令" };
+    }
+    return { kind: "code", title: "代码 / 脚本片段" };
+  }
+  const firstLine = content.split("\n")[0].trim();
+  return { kind: "text", title: firstLine.length > 36 ? firstLine.slice(0, 36) + "..." : firstLine || "纯文本记录" };
+}
+
 export const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<ActiveTab>("history");
+  const [filterCategory, setFilterCategory] = useState<FilterCategory>("all");
   const [query, setQuery] = useState<string>("");
-  const [displayItems, setDisplayItems] = useState<DisplayItem[]>([]);
+  const [rawDisplayItems, setRawDisplayItems] = useState<DisplayItem[]>([]);
   const [selectedIndex, setSelectedIndex] = useState<number>(0);
-  const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
+  const [drawerOpen, setDrawerOpen] = useState<boolean>(false);
+  const [temporaryRevealId, setTemporaryRevealId] = useState<number | null>(null);
+
+  // 动作面板与图片放大预览
   const [actionPaletteOpen, setActionPaletteOpen] = useState<boolean>(false);
   const [actionSelectedIndex, setActionSelectedIndex] = useState<number>(0);
   const [transformError, setTransformError] = useState<string | null>(null);
@@ -171,17 +252,17 @@ export const App: React.FC = () => {
   const [ocrTextMap, setOcrTextMap] = useState<Record<number, string>>({});
   const [ocrLoading, setOcrLoading] = useState<boolean>(false);
 
-  // 多选状态 (工单 #9 AC-4)
+  // 多选状态
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
 
-  // 队列连贴状态 (工单 #9 AC-1 ~ AC-3)
+  // 连贴队列
   const [queueStatus, setQueueStatus] = useState<QueueStatus>({
     is_active: false,
     count: 0,
     items: [],
   });
 
-  // 常用短语编辑模态框与表单状态 (AC-1)
+  // 短语编辑模态框
   const [snippetModalOpen, setSnippetModalOpen] = useState<boolean>(false);
   const [editingSnippet, setEditingSnippet] = useState<Snippet | null>(null);
   const [snippetTitle, setSnippetTitle] = useState<string>("");
@@ -189,14 +270,14 @@ export const App: React.FC = () => {
   const [snippetContent, setSnippetContent] = useState<string>("");
   const [snippetFormError, setSnippetFormError] = useState<string | null>(null);
 
-  // 隐身模式状态 (工单 #10 AC-1)
+  // 隐身模式
   const [incognitoStatus, setIncognitoStatus] = useState<IncognitoStatus>({
     is_active: false,
     expires_at: null,
     remaining_seconds: null,
   });
 
-  // 系统设置与灾备归档模态框 (工单 #10 AC-2 ~ AC-4)
+  // 设置模态框
   const [settingsModalOpen, setSettingsModalOpen] = useState<boolean>(false);
   const [autostartEnabled, setAutostartEnabled] = useState<boolean>(false);
   const [backupPath, setBackupPath] = useState<string>("clip_backup.clipbak");
@@ -208,13 +289,13 @@ export const App: React.FC = () => {
   const listRef = useRef<HTMLDivElement>(null);
 
   /**
-   * 加载或检索列表数据（支持剪贴板历史与常用短语独立 Tab 及混合模式）
+   * 加载数据并生成统一直观展示模型
    */
   const loadData = useCallback(async (tab: ActiveTab, searchQuery: string) => {
     try {
       const q = searchQuery.trim();
 
-      // 1. 独立短语 Tab 模式 (AC-1)
+      // 1. 独立短语 Tab 模式
       if (tab === "snippets") {
         let snippetsList: Snippet[];
         if (q.length === 0) {
@@ -222,7 +303,7 @@ export const App: React.FC = () => {
         } else {
           snippetsList = await invoke<Snippet[]>("search_snippets", { query: q });
         }
-        setDisplayItems(
+        setRawDisplayItems(
           snippetsList.map((s) => ({
             id: s.id,
             isSnippet: true,
@@ -232,6 +313,7 @@ export const App: React.FC = () => {
             entry_type: "snippet",
             created_at: s.updated_at,
             is_pinned: false,
+            kind: "snippet",
             rawSnippet: s,
           }))
         );
@@ -239,10 +321,10 @@ export const App: React.FC = () => {
         return;
       }
 
-      // 2. 剪贴板历史 Tab 下以 / 开头触发短语快速搜索 (AC-3)
+      // 2. 剪贴板历史 Tab 下以 / 开头触发短语快速搜索
       if (q.startsWith("/")) {
         const snippetsList = await invoke<Snippet[]>("search_snippets", { query: q });
-        setDisplayItems(
+        setRawDisplayItems(
           snippetsList.map((s) => ({
             id: s.id,
             isSnippet: true,
@@ -252,6 +334,7 @@ export const App: React.FC = () => {
             entry_type: "snippet",
             created_at: s.updated_at,
             is_pinned: false,
+            kind: "snippet",
             rawSnippet: s,
           }))
         );
@@ -262,12 +345,12 @@ export const App: React.FC = () => {
       // 3. 常规剪贴板历史拉取
       let history: ClipboardEntry[];
       if (q.length === 0) {
-        history = await invoke<ClipboardEntry[]>("get_history", { limit: 50 });
+        history = await invoke<ClipboardEntry[]>("get_history", { limit: 100 });
       } else {
-        history = await invoke<ClipboardEntry[]>("search_history", { query: q, limit: 50 });
+        history = await invoke<ClipboardEntry[]>("search_history", { query: q, limit: 100 });
       }
 
-      // 若有关键词搜索，同时混合检索短语并置顶高亮微标展示 (AC-3)
+      // 若有关键词搜索，同时混合检索短语并置顶高亮微标展示
       let matchedSnippets: Snippet[] = [];
       if (q.length > 0) {
         try {
@@ -286,20 +369,27 @@ export const App: React.FC = () => {
         entry_type: "snippet",
         created_at: s.updated_at,
         is_pinned: false,
+        kind: "snippet",
         rawSnippet: s,
       }));
 
-      const historyItems: DisplayItem[] = history.map((item) => ({
-        id: item.id,
-        isSnippet: false,
-        content: item.content,
-        entry_type: item.entry_type,
-        created_at: item.created_at,
-        is_pinned: item.is_pinned,
-        rawEntry: item,
-      }));
+      const historyItems: DisplayItem[] = history.map((item) => {
+        const isImage = item.entry_type === "image";
+        const { kind, title } = analyzeContent(item.content, isImage, false);
+        return {
+          id: item.id,
+          isSnippet: false,
+          content: item.content,
+          title,
+          entry_type: item.entry_type,
+          created_at: item.created_at,
+          is_pinned: item.is_pinned,
+          kind,
+          rawEntry: item,
+        };
+      });
 
-      setDisplayItems([...snippetItems, ...historyItems]);
+      setRawDisplayItems([...snippetItems, ...historyItems]);
       setSelectedIndex(0);
 
       // 并行批量拉取图片缩略图 Base64 详情并缓存
@@ -317,31 +407,51 @@ export const App: React.FC = () => {
   }, []);
 
   /**
-   * 触发指定条目的极速回填
+   * 6 大分类过滤后的展示列表
+   */
+  const displayItems = useMemo(() => {
+    if (activeTab === "snippets") {
+      return rawDisplayItems;
+    }
+    return rawDisplayItems.filter((item) => {
+      if (filterCategory === "all") return true;
+      if (filterCategory === "pinned") return item.is_pinned;
+      if (filterCategory === "image") return item.kind === "image";
+      if (filterCategory === "code") return item.kind === "code";
+      if (filterCategory === "link") return item.kind === "link";
+      if (filterCategory === "text") return item.kind === "text" || item.kind === "sensitive";
+      return true;
+    });
+  }, [activeTab, filterCategory, rawDisplayItems]);
+
+  /**
+   * 触发条目极速回填
    */
   const handlePaste = useCallback(async (id: number) => {
     try {
       await invoke("paste_entry", { id });
       setPreviewModalOpen(false);
+      setDrawerOpen(false);
     } catch (err) {
       console.error("回填剪贴板条目失败:", err);
     }
   }, []);
 
   /**
-   * 触发常用短语的极速回填与模板动态变量解析 (AC-2)
+   * 触发常用短语回填
    */
   const handlePasteSnippet = useCallback(async (id: number) => {
     try {
       await invoke("paste_snippet", { id });
       setPreviewModalOpen(false);
+      setDrawerOpen(false);
     } catch (err) {
       console.error("回填常用短语失败:", err);
     }
   }, []);
 
   /**
-   * 切换单个条目的多选勾选状态 (AC-4)
+   * 切换单个条目的多选勾选状态
    */
   const handleToggleSelectItem = useCallback((id: number, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
@@ -351,7 +461,7 @@ export const App: React.FC = () => {
   }, []);
 
   /**
-   * 多选条目换行合并回填 (AC-4)
+   * 多选条目换行合并回填
    */
   const handlePasteMultiple = useCallback(async (ids: number[]) => {
     if (ids.length === 0) return;
@@ -359,13 +469,14 @@ export const App: React.FC = () => {
       await invoke("paste_multiple_entries", { ids, separator: "\n" });
       setSelectedIds([]);
       setPreviewModalOpen(false);
+      setDrawerOpen(false);
     } catch (err) {
       console.error("多选合并回填失败:", err);
     }
   }, []);
 
   /**
-   * 切换连贴收集模式 (AC-1)
+   * 连贴收集与队列控制
    */
   const handleTogglePasteQueue = useCallback(async () => {
     try {
@@ -376,9 +487,6 @@ export const App: React.FC = () => {
     }
   }, []);
 
-  /**
-   * 停止连贴模式并清空队列 (AC-3)
-   */
   const handleStopPasteQueue = useCallback(async () => {
     try {
       const status = await invoke<QueueStatus>("clear_paste_queue");
@@ -388,9 +496,6 @@ export const App: React.FC = () => {
     }
   }, []);
 
-  /**
-   * 连贴队列头部出队并回填 (AC-2)
-   */
   const handlePasteQueuePop = useCallback(async () => {
     try {
       await invoke("paste_queue_pop");
@@ -400,7 +505,7 @@ export const App: React.FC = () => {
   }, []);
 
   /**
-   * 切换隐身模式 (工单 #10 AC-1)
+   * 切换隐身模式
    */
   const handleToggleIncognito = useCallback(async (durationMinutes?: number) => {
     try {
@@ -414,7 +519,7 @@ export const App: React.FC = () => {
   }, []);
 
   /**
-   * 切换开机自启动配置 (工单 #10 AC-2)
+   * 开机自启动设置
    */
   const handleToggleAutostart = useCallback(async () => {
     try {
@@ -426,7 +531,7 @@ export const App: React.FC = () => {
   }, [autostartEnabled]);
 
   /**
-   * 导出 .clipbak 灾备归档 (工单 #10 AC-3)
+   * 导出与恢复灾备归档
    */
   const handleExportBackup = useCallback(async () => {
     if (!backupPath.trim()) return;
@@ -448,9 +553,6 @@ export const App: React.FC = () => {
     }
   }, [backupPath]);
 
-  /**
-   * 从 .clipbak 还原数据 (工单 #10 AC-4)
-   */
   const handleImportBackup = useCallback(async () => {
     if (!backupPath.trim()) return;
     setBackupLoading(true);
@@ -472,11 +574,8 @@ export const App: React.FC = () => {
     }
   }, [backupPath, loadData, activeTab, query]);
 
-  /**
-   * 清空全部剪贴板历史记录
-   */
   const handleClearAllHistory = useCallback(async () => {
-    if (!window.confirm("确定要清空全部剪贴板历史记录和图片缓存吗？（常用短语不会被删除）")) {
+    if (!window.confirm("确定要清空全部剪贴板历史记录和图片缓存吗？（常用短语将保留）")) {
       return;
     }
     try {
@@ -495,19 +594,7 @@ export const App: React.FC = () => {
   }, [loadData, activeTab, query]);
 
   /**
-   * 触发自定义文本（如 OCR 提取文本）的极速回填
-   */
-  const handlePasteCustomText = useCallback(async (text: string) => {
-    try {
-      await invoke("paste_custom_text", { text });
-      setPreviewModalOpen(false);
-    } catch (err) {
-      console.error("回填自定义文本失败:", err);
-    }
-  }, []);
-
-  /**
-   * 触发指定图片条目的原生离线 OCR 识别
+   * 原生离线 OCR
    */
   const handleOcr = useCallback(
     async (id: number) => {
@@ -516,7 +603,7 @@ export const App: React.FC = () => {
       try {
         const recognized = await invoke<string>("ocr_image_entry", { id });
         setOcrTextMap((prev) => ({ ...prev, [id]: recognized }));
-        setPreviewModalOpen(true);
+        setDrawerOpen(true);
         loadData(activeTab, query);
       } catch (err: unknown) {
         const msg = typeof err === "string" ? err : "文字提取失败";
@@ -531,7 +618,7 @@ export const App: React.FC = () => {
   );
 
   /**
-   * 触发指定条目的动作转换与极速回填
+   * 动作格式转换并回填
    */
   const handleTransformAndPaste = useCallback(async (id: number, actionKey: ActionKey) => {
     setTransformError(null);
@@ -545,9 +632,6 @@ export const App: React.FC = () => {
     }
   }, []);
 
-  /**
-   * 统一执行选中的动作项
-   */
   const executeAction = useCallback(
     (item: ClipboardEntry, actionKey: ActionKey) => {
       if (actionKey === "ocr") {
@@ -559,26 +643,9 @@ export const App: React.FC = () => {
     [handleOcr, handleTransformAndPaste]
   );
 
-  /**
-   * 强制以纯文本格式回填当前条目 (Shift + Enter 专用)
-   */
-  const handlePastePlain = useCallback(async (id: number) => {
-    try {
-      await invoke("paste_plain_entry", { id });
-      setPreviewModalOpen(false);
-    } catch (err) {
-      console.error("纯文本回填失败:", err);
-    }
-  }, []);
-
-  /**
-   * 切换指定条目的置顶固定状态 (Pin / Unpin)
-   */
   const handleTogglePin = useCallback(
     async (id: number, e?: React.MouseEvent) => {
-      if (e) {
-        e.stopPropagation();
-      }
+      if (e) e.stopPropagation();
       try {
         await invoke("toggle_pin", { id });
         loadData(activeTab, query);
@@ -590,7 +657,7 @@ export const App: React.FC = () => {
   );
 
   /**
-   * 打开新建常用短语弹窗
+   * 常用短语弹窗控制
    */
   const handleOpenCreateSnippet = useCallback(() => {
     setEditingSnippet(null);
@@ -601,9 +668,6 @@ export const App: React.FC = () => {
     setSnippetModalOpen(true);
   }, []);
 
-  /**
-   * 打开编辑常用短语弹窗
-   */
   const handleOpenEditSnippet = useCallback((snippet: Snippet, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
     setEditingSnippet(snippet);
@@ -614,9 +678,6 @@ export const App: React.FC = () => {
     setSnippetModalOpen(true);
   }, []);
 
-  /**
-   * 删除常用短语 (AC-1)
-   */
   const handleDeleteSnippet = useCallback(
     async (id: number, e?: React.MouseEvent) => {
       if (e) e.stopPropagation();
@@ -630,9 +691,6 @@ export const App: React.FC = () => {
     [activeTab, query, loadData]
   );
 
-  /**
-   * 保存或更新常用短语模板 (AC-1)
-   */
   const handleSaveSnippet = useCallback(async () => {
     if (!snippetTitle.trim()) {
       setSnippetFormError("短语标题不能为空");
@@ -657,9 +715,6 @@ export const App: React.FC = () => {
     }
   }, [editingSnippet, snippetTitle, snippetContent, snippetShortcut, activeTab, query, loadData]);
 
-  /**
-   * 快捷向模板内容光标处插入动态占位符变量 (AC-2)
-   */
   const insertPlaceholder = useCallback((ph: string) => {
     if (textareaRef.current) {
       const el = textareaRef.current;
@@ -678,12 +733,31 @@ export const App: React.FC = () => {
   }, []);
 
   /**
+   * 敏感凭据 3 秒临时显露明文
+   */
+  const handleRevealSensitive = useCallback((id: number) => {
+    setTemporaryRevealId(id);
+    setTimeout(() => {
+      setTemporaryRevealId((prev) => (prev === id ? null : prev));
+    }, 3000);
+  }, []);
+
+  /**
+   * 浏览器外链打开
+   */
+  const handleOpenLinkInBrowser = useCallback((url: string) => {
+    openUrl(url).catch((err) => console.error("在浏览器打开链接失败:", err));
+  }, []);
+
+  /**
    * 主动隐藏悬浮面板
    */
   const handleClose = useCallback(async () => {
     setActionPaletteOpen(false);
     setPreviewModalOpen(false);
     setSnippetModalOpen(false);
+    setSettingsModalOpen(false);
+    setDrawerOpen(false);
     try {
       await invoke("hide_window");
     } catch (err) {
@@ -691,14 +765,12 @@ export const App: React.FC = () => {
     }
   }, []);
 
-  // 搜索框输入联动
   const handleQueryChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value;
     setQuery(val);
     loadData(activeTab, val);
   };
 
-  // Tab 模式切换
   const handleTabChange = (newTab: ActiveTab) => {
     setActiveTab(newTab);
     loadData(newTab, query);
@@ -709,46 +781,42 @@ export const App: React.FC = () => {
   useEffect(() => {
     loadData(activeTab, "");
 
-    // 1. 获取初始连贴状态 (AC-1)
     invoke<QueueStatus>("get_paste_queue_status")
       .then(setQueueStatus)
       .catch((err) => console.error("获取连贴状态失败:", err));
 
-    // 获取初始隐身状态与自启配置 (工单 #10)
     invoke<IncognitoStatus>("get_incognito_status")
       .then(setIncognitoStatus)
       .catch((err) => console.error("获取隐身状态失败:", err));
+
     invoke<boolean>("is_autostart_enabled")
       .then(setAutostartEnabled)
       .catch((err) => console.error("获取自启配置失败:", err));
 
-    // 2. 监听系统剪贴板更新事件
     const unlistenClipboard = listen<ClipboardEntry>("clipboard-changed", () => {
       loadData(activeTab, query);
     });
 
-    // 3. 监听队列连贴状态变更广播 (AC-1 ~ AC-3)
     const unlistenQueue = listen<QueueStatus>("paste-queue-changed", (event) => {
       setQueueStatus(event.payload);
     });
 
-    // 监听隐身状态变更广播 (工单 #10 AC-1)
     const unlistenIncognito = listen<IncognitoStatus>("incognito-changed", (event) => {
       setIncognitoStatus(event.payload);
     });
 
-    // 监听外部数据恢复或清空广播 (工单 #10 AC-4)
     const unlistenRestored = listen("data-restored", () => {
       loadData(activeTab, query);
     });
 
-    // 4. 监听窗口唤起展示事件 (初始化焦点与清空历史)
     const unlistenPanelShown = listen("panel-shown", () => {
       setQuery("");
       setActiveTab("history");
+      setFilterCategory("all");
       loadData("history", "");
       setSelectedIndex(0);
       setSelectedIds([]);
+      setDrawerOpen(false);
       setActionPaletteOpen(false);
       setPreviewModalOpen(false);
       setSnippetModalOpen(false);
@@ -759,7 +827,6 @@ export const App: React.FC = () => {
       }, 20);
     });
 
-    // 5. 页面失焦无感自隐防御
     const handleBlur = () => {
       handleClose();
     };
@@ -775,39 +842,52 @@ export const App: React.FC = () => {
     };
   }, [loadData, activeTab, query, handleClose]);
 
-  // 全局键盘导航处理
-  // 全局键盘导航处理
+  // 全局键盘导航流闭环 (Issue #15)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // 1. 输入法合成状态保护：正在输入中文拼音时，Enter 仅用于确认上屏，绝不触发粘贴
+      // 1. 输入法合成保护
       if (e.isComposing) {
         return;
       }
 
-      // 设置与灾备归档模态框处于开启态时的键盘路由
-      if (settingsModalOpen) {
-        if (e.key === "Escape") {
-          e.preventDefault();
+      // 2. 逐级退出 (Hierarchical Dismissal: Escape)
+      if (e.key === "Escape") {
+        e.preventDefault();
+        if (previewModalOpen) {
+          setPreviewModalOpen(false);
+          return;
+        }
+        if (drawerOpen) {
+          setDrawerOpen(false);
+          return;
+        }
+        if (actionPaletteOpen) {
+          setActionPaletteOpen(false);
+          return;
+        }
+        if (settingsModalOpen) {
           setSettingsModalOpen(false);
           return;
         }
-        return;
-      }
-
-      // 2. 短语编辑模态框处于开启态时的键盘路由
-      if (snippetModalOpen) {
-        if (e.key === "Escape") {
-          e.preventDefault();
+        if (snippetModalOpen) {
           setSnippetModalOpen(false);
           return;
         }
-        // 模态框内打字编辑时不拦截其它输入
+        if (selectedIds.length > 0) {
+          setSelectedIds([]);
+          return;
+        }
+        handleClose();
         return;
       }
 
-      // 3. 大图放大预览模态框开启时的键盘路由
+      // 3. 模态框激活时的键盘路由
+      if (settingsModalOpen || snippetModalOpen) {
+        return;
+      }
+
       if (previewModalOpen) {
-        if (e.key === "Escape" || e.key === " ") {
+        if (e.key === " ") {
           e.preventDefault();
           setPreviewModalOpen(false);
           return;
@@ -815,21 +895,18 @@ export const App: React.FC = () => {
         if (e.key === "Enter") {
           e.preventDefault();
           const current = displayItems[selectedIndex];
-          if (current) {
-            handlePaste(current.id);
-          }
+          if (current) handlePaste(current.id);
           return;
         }
-        e.preventDefault();
         return;
       }
 
       // 4. Action Palette 处于激活态时的键盘路由
       if (actionPaletteOpen) {
         const current = displayItems[selectedIndex];
-        const activeActions = current?.entry_type === "image" ? IMAGE_ACTIONS : TRANSFORM_ACTIONS;
+        const activeActions = current?.kind === "image" ? IMAGE_ACTIONS : TRANSFORM_ACTIONS;
 
-        if (e.key === "Escape" || (e.ctrlKey && (e.key === "k" || e.key === "K")) || e.key === "Tab") {
+        if (e.key === "Tab" || (e.ctrlKey && (e.key === "k" || e.key === "K"))) {
           e.preventDefault();
           setActionPaletteOpen(false);
           return;
@@ -856,7 +933,6 @@ export const App: React.FC = () => {
           return;
         }
 
-        // 数字键快捷触发对应动作 (1~8)
         if (e.key >= "1" && e.key <= String(activeActions.length)) {
           const actionIdx = parseInt(e.key, 10) - 1;
           const action = activeActions[actionIdx];
@@ -866,24 +942,10 @@ export const App: React.FC = () => {
             return;
           }
         }
-
-        e.preventDefault();
-        e.stopPropagation();
         return;
       }
 
-      // 5. 主列表状态下的按键调度
-      // Esc: 优先取消多选；若未多选则瞬间无感自隐并释放焦点 (AC-4)
-      if (e.key === "Escape") {
-        e.preventDefault();
-        if (selectedIds.length > 0) {
-          setSelectedIds([]);
-          return;
-        }
-        handleClose();
-        return;
-      }
-
+      // 5. 顶层全局快捷键
       // Ctrl + 1 / Ctrl + 2: 切换 Tab 模式
       if (e.ctrlKey && e.key === "1") {
         e.preventDefault();
@@ -903,7 +965,7 @@ export const App: React.FC = () => {
         return;
       }
 
-      // Tab 或 Ctrl+K: 唤出 Action Palette 动作浮层 (仅对历史条目生效)
+      // Tab 或 Ctrl+K: 唤出 Action Palette 动作浮层
       if ((e.ctrlKey && (e.key === "k" || e.key === "K")) || e.key === "Tab") {
         const current = displayItems[selectedIndex];
         if (current && !current.isSnippet) {
@@ -914,28 +976,7 @@ export const App: React.FC = () => {
         }
       }
 
-      // Space 或 Alt+Space: 图片大图放大预览
-      const isSpaceTrigger = (e.key === " " && (document.activeElement !== inputRef.current || query.length === 0)) || (e.altKey && e.key === " ");
-      if (isSpaceTrigger) {
-        const current = displayItems[selectedIndex];
-        if (current && current.entry_type === "image") {
-          e.preventDefault();
-          setPreviewModalOpen(true);
-          return;
-        }
-      }
-
-      // Shift + Enter: 强制纯文本格式极速回填 (仅普通文本条目生效)
-      if (e.shiftKey && e.key === "Enter") {
-        e.preventDefault();
-        const current = displayItems[selectedIndex];
-        if (current && !current.isSnippet && current.entry_type === "text") {
-          handlePastePlain(current.id);
-        }
-        return;
-      }
-
-      // Alt + P 快捷切换当前选中项置顶 (仅历史条目生效)
+      // Alt + P: 置顶/取消置顶
       if (e.altKey && (e.key === "p" || e.key === "P")) {
         e.preventDefault();
         const current = displayItems[selectedIndex];
@@ -945,11 +986,20 @@ export const App: React.FC = () => {
         return;
       }
 
-      // 动态序号极速回填：Alt + 1~9 强制回填，或输入框无内容/非输入态敲数字键回填
-      const isNumberKey = e.key >= "1" && e.key <= "9";
+      // Space 键: 展开/收起右侧即时抽屉检查器 (Quick Look Drawer)
+      const isInputFocused = document.activeElement === inputRef.current;
+      const isSpaceTrigger = (e.key === " " && (!isInputFocused || query.length === 0)) || (e.altKey && e.key === " ");
+      if (isSpaceTrigger) {
+        e.preventDefault();
+        setDrawerOpen((prev) => !prev);
+        return;
+      }
+
+      // 1~8 数字键极速单键粘贴：当搜索框无输入内容或非聚焦时直接触发，或者配合 Alt + 1~8 强制触发
+      const isNumberKey = e.key >= "1" && e.key <= "8";
       const shouldFastPasteNumber =
         (e.altKey && isNumberKey) ||
-        (isNumberKey && (document.activeElement !== inputRef.current || query.length === 0));
+        (isNumberKey && (!isInputFocused || query.length === 0));
 
       if (shouldFastPasteNumber) {
         const num = parseInt(e.key, 10);
@@ -965,7 +1015,7 @@ export const App: React.FC = () => {
         }
       }
 
-      // Shift + 上下键扩展多选范围 (工单 #9 AC-4)
+      // Shift + 上下键扩展多选范围
       if (e.shiftKey && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
         e.preventDefault();
         const nextIndex =
@@ -986,7 +1036,7 @@ export const App: React.FC = () => {
         return;
       }
 
-      // 上下方向键导航
+      // 上下方向键无缝漫游
       if (e.key === "ArrowDown") {
         e.preventDefault();
         setSelectedIndex((prev) => (prev < displayItems.length - 1 ? prev + 1 : prev));
@@ -994,7 +1044,7 @@ export const App: React.FC = () => {
         e.preventDefault();
         setSelectedIndex((prev) => (prev > 0 ? prev - 1 : 0));
       } else if (e.key === "Enter") {
-        // 多选模式下按回车以换行符合并粘贴至目标窗口 (AC-4)
+        // 多选模式下按回车合并粘贴
         if (selectedIds.length > 1) {
           e.preventDefault();
           handlePasteMultiple(selectedIds);
@@ -1006,7 +1056,7 @@ export const App: React.FC = () => {
           setSelectedIds([]);
           return;
         }
-        // 回车极速回填当前高亮条目 (AC-2 & AC-3)
+        // 单项回车极速回填
         e.preventDefault();
         const current = displayItems[selectedIndex];
         if (current) {
@@ -1026,13 +1076,14 @@ export const App: React.FC = () => {
     selectedIndex,
     selectedIds,
     query,
+    drawerOpen,
     snippetModalOpen,
     actionPaletteOpen,
     actionSelectedIndex,
     previewModalOpen,
+    settingsModalOpen,
     handleClose,
     handlePaste,
-    handlePastePlain,
     handlePasteSnippet,
     handlePasteMultiple,
     handleTransformAndPaste,
@@ -1040,11 +1091,10 @@ export const App: React.FC = () => {
     handleOpenCreateSnippet,
     handleTabChange,
     executeAction,
-    settingsModalOpen,
   ]);
 
+  // 独立 HUD 视图模式 (连贴胶囊浮窗)
   const isHudView = typeof window !== "undefined" && window.location.search.includes("view=hud");
-
   if (isHudView) {
     return (
       <div className="capsule-hud-standalone">
@@ -1064,19 +1114,11 @@ export const App: React.FC = () => {
         </div>
         <div className="capsule-hud-buttons">
           {queueStatus.count > 0 && (
-            <button
-              className="capsule-action-btn pop"
-              onClick={handlePasteQueuePop}
-              title="手动出队回填下一项"
-            >
+            <button className="capsule-action-btn pop" onClick={handlePasteQueuePop} title="手动回填下一项">
               回填
             </button>
           )}
-          <button
-            className="capsule-action-btn stop"
-            onClick={handleStopPasteQueue}
-            title="退出连贴模式 (Alt+Shift+C)"
-          >
+          <button className="capsule-action-btn stop" onClick={handleStopPasteQueue} title="退出连贴模式 (Alt+Shift+C)">
             退出
           </button>
         </div>
@@ -1084,477 +1126,621 @@ export const App: React.FC = () => {
     );
   }
 
+  // 当前选中的项
+  const selectedItem = displayItems[selectedIndex];
+
   return (
     <div className="panel-container">
-      <header className="panel-header" data-tauri-drag-region>
-        <div className="tab-bar">
-          <div className="tab-group">
-            <button
-              className={`tab-btn ${activeTab === "history" ? "active" : ""}`}
-              onClick={() => handleTabChange("history")}
-            >
-              📋 剪贴板历史
-            </button>
-            <button
-              className={`tab-btn ${activeTab === "snippets" ? "active" : ""}`}
-              onClick={() => handleTabChange("snippets")}
-            >
-              ⚡ 常用短语
-            </button>
+      {/* ========================================================================= */}
+      {/* 二层紧凑高信息密度头部 (Two-Layer Compact Header - 高度 ≤ 82px)               */}
+      {/* ========================================================================= */}
+      <header className="panel-header-compact" data-tauri-drag-region>
+        {/* Row 1: 整合搜索栏、模式切换胶囊与工具入口 (44px) */}
+        <div className="header-row-1">
+          <div className="search-wrapper">
+            <span className="search-icon">🔍</span>
+            <input
+              ref={inputRef}
+              type="text"
+              className="search-input"
+              value={query}
+              onChange={handleQueryChange}
+              placeholder={
+                activeTab === "snippets"
+                  ? "搜索常用短语 (支持标题、/快捷缩写或内容)..."
+                  : "搜索剪贴板历史 (支持拼音简拼) 或输入 / 唤出短语..."
+              }
+              autoFocus
+            />
+            {query && (
+              <button
+                className="search-clear-btn"
+                onClick={() => {
+                  setQuery("");
+                  loadData(activeTab, "");
+                  inputRef.current?.focus();
+                }}
+                title="清空搜索"
+              >
+                ✕
+              </button>
+            )}
           </div>
-          <div className="tab-actions">
+
+          <div className="header-controls">
+            {/* 分段模式胶囊 */}
+            <div className="segmented-pill">
+              <button
+                className={`segmented-btn ${activeTab === "history" ? "active" : ""}`}
+                onClick={() => handleTabChange("history")}
+                title="剪贴板历史模式 (Alt+V)"
+              >
+                <span>📋 历史</span>
+                <span className="pill-shortcut">Alt+V</span>
+              </button>
+              <button
+                className={`segmented-btn ${activeTab === "snippets" ? "active" : ""}`}
+                onClick={() => handleTabChange("snippets")}
+                title="常用短语模板库 (/)"
+              >
+                <span>⚡ 短语</span>
+                <span className="pill-shortcut">/</span>
+              </button>
+            </div>
+
+            {/* 即时抽屉检查器切换按钮 */}
             <button
-              className={`queue-toggle-btn ${queueStatus.is_active ? "active" : ""}`}
+              className={`header-action-btn ${drawerOpen ? "active" : ""}`}
+              onClick={() => setDrawerOpen((prev) => !prev)}
+              title="按空格键切换抽屉预览 (Space)"
+            >
+              <span>👁️</span>
+              <span>{drawerOpen ? "收起 (Space)" : "预览 (Space)"}</span>
+            </button>
+
+            {/* 新建短语按钮 (短语模式专属) */}
+            {activeTab === "snippets" && (
+              <button className="header-action-btn" onClick={handleOpenCreateSnippet} title="新建短语模板 (Ctrl+N)">
+                <span>+ 新建</span>
+              </button>
+            )}
+
+            {/* 连贴队列开关 */}
+            <button
+              className={`header-action-btn ${queueStatus.is_active ? "active" : ""}`}
               onClick={handleTogglePasteQueue}
               title="切换队列连贴模式 (Alt+Shift+C)"
             >
-              📥 {queueStatus.is_active ? `连贴中 (${queueStatus.count})` : "连贴收集 (Alt+Shift+C)"}
+              <span>📥</span>
+              <span>{queueStatus.is_active ? `${queueStatus.count}项` : "连贴"}</span>
             </button>
-            {activeTab === "snippets" && (
-              <button className="new-snippet-btn" onClick={handleOpenCreateSnippet} title="新建短语模板 (Ctrl+N)">
-                + 新建短语
-              </button>
-            )}
+
+            {/* 隐身模式开关 */}
             <button
-              className={`incognito-toggle-btn ${incognitoStatus.is_active ? "active" : ""}`}
+              className={`header-action-btn ${incognitoStatus.is_active ? "active" : ""}`}
               onClick={() => handleToggleIncognito()}
-              title="切换隐身模式 (AC-1)"
+              title="切换隐私无痕模式"
             >
-              🕵️ {incognitoStatus.is_active ? "隐身中" : "隐身"}
+              <span>🕵️</span>
+              <span>{incognitoStatus.is_active ? "无痕" : ""}</span>
             </button>
+
+            {/* 设置按钮 */}
             <button
-              className="settings-toggle-btn"
+              className="header-action-btn"
               onClick={() => {
                 setSettingsModalOpen(true);
                 setBackupMsg(null);
               }}
-              title="系统设置与灾备管理 (AC-2, AC-3, AC-4)"
+              title="系统设置与灾备管理"
             >
-              ⚙️ 设置
+              <span>⚙️</span>
             </button>
           </div>
         </div>
 
+        {/* 隐身模式活跃提醒横幅 */}
         {incognitoStatus.is_active && (
           <div className="incognito-banner">
             <div className="incognito-banner-info">
-              <span className="incognito-banner-icon">🕵️</span>
-              <span className="incognito-banner-text">
-                隐身模式进行中：已暂停记录剪贴板内容
-                {incognitoStatus.remaining_seconds
-                  ? ` (剩余约 ${Math.ceil(incognitoStatus.remaining_seconds / 60)} 分钟)`
-                  : ""}
-              </span>
+              <span>🕵️ 隐私无痕模式进行中：已暂停捕获剪贴板记录</span>
+              {incognitoStatus.remaining_seconds && (
+                <span>(剩余约 {Math.ceil(incognitoStatus.remaining_seconds / 60)} 分钟)</span>
+              )}
             </div>
-            <button
-              className="incognito-banner-btn"
-              onClick={() => handleToggleIncognito()}
-            >
-              退出隐身
+            <button className="incognito-banner-btn" onClick={() => handleToggleIncognito()}>
+              退出无痕
             </button>
           </div>
         )}
 
-        <div className="search-bar">
-          <span className="search-icon">🔍</span>
-          <input
-            ref={inputRef}
-            type="text"
-            className="search-input"
-            value={query}
-            onChange={handleQueryChange}
-            placeholder={
-              activeTab === "snippets"
-                ? "搜索短语（支持标题、/缩写如 /meet 或内容）..."
-                : "搜索剪贴板（输入 / 快速唤起常用短语，支持中文拼音）..."
-            }
-            autoFocus
-          />
-        </div>
-        <div className="shortcut-hints">
-          {activeTab === "snippets" ? (
-            <>
-              <span className="hint-tag"><kbd>1~9</kbd> / <kbd>↵</kbd> 回填</span>
-              <span className="hint-tag"><kbd>Ctrl+N</kbd> 新建</span>
-              <span className="hint-tag"><kbd>Ctrl+1</kbd> 历史</span>
-              <span className="hint-tag"><kbd>Esc</kbd> 自隐</span>
-            </>
+        {/* Row 2: 6 流线型分类过滤栏与简洁统计提示 (34px) */}
+        <div className="header-row-2">
+          {activeTab === "history" ? (
+            <div className="filter-chips">
+              <button
+                className={`filter-chip ${filterCategory === "all" ? "active" : ""}`}
+                onClick={() => setFilterCategory("all")}
+              >
+                <span>全部 ({rawDisplayItems.length})</span>
+              </button>
+              <button
+                className={`filter-chip chip-pinned ${filterCategory === "pinned" ? "active" : ""}`}
+                onClick={() => setFilterCategory("pinned")}
+              >
+                <span>★ 置顶</span>
+              </button>
+              <button
+                className={`filter-chip ${filterCategory === "text" ? "active" : ""}`}
+                onClick={() => setFilterCategory("text")}
+              >
+                <span>📄 文本</span>
+              </button>
+              <button
+                className={`filter-chip ${filterCategory === "image" ? "active" : ""}`}
+                onClick={() => setFilterCategory("image")}
+              >
+                <span>🖼️ 图片</span>
+              </button>
+              <button
+                className={`filter-chip ${filterCategory === "code" ? "active" : ""}`}
+                onClick={() => setFilterCategory("code")}
+              >
+                <span>💻 代码</span>
+              </button>
+              <button
+                className={`filter-chip ${filterCategory === "link" ? "active" : ""}`}
+                onClick={() => setFilterCategory("link")}
+              >
+                <span>🔗 链接</span>
+              </button>
+            </div>
           ) : (
-            <>
-              <span className="hint-tag"><kbd>Alt+Shift+C</kbd> 连贴</span>
-              <span className="hint-tag"><kbd>Shift+↑↓</kbd> 多选</span>
-              <span className="hint-tag"><kbd>Tab</kbd> / <kbd>Ctrl+K</kbd> 动作</span>
-              <span className="hint-tag"><kbd>1~9</kbd> 回填</span>
-              <span className="hint-tag"><kbd>Alt+P</kbd> 置顶</span>
-              <span className="hint-tag"><kbd>Esc</kbd> 自隐</span>
-            </>
+            <div className="filter-chips">
+              <span className="filter-chip active">常用短语模板库 ({rawDisplayItems.length})</span>
+            </div>
           )}
+
+          <div className="header-stats-label">
+            <span>共 {displayItems.length} 条</span>
+            <span className="stats-divider">•</span>
+            <span>按 1~8 快捷回填</span>
+          </div>
         </div>
       </header>
 
-      <div className="panel-list" ref={listRef}>
-        {displayItems.length === 0 ? (
-          <div className="empty-state">
-            <p>{query ? "未找到匹配条目" : activeTab === "snippets" ? "暂无常用短语模板" : "暂无剪贴板历史记录"}</p>
-            <span className="empty-sub">
-              {query
-                ? "尝试更换拼音首字母简拼或模糊关键词"
-                : activeTab === "snippets"
-                ? "点击上方 [+ 新建短语] 预置高频常用回复或模板"
-                : "复制任意文本或截屏图片后将自动捕获并在此显示"}
-            </span>
-          </div>
-        ) : (
-          displayItems.map((item, index) => {
-            const isSelected = index === selectedIndex;
-            const fastPasteIndex = index < 9 ? index + 1 : null;
-
-            // 1. 常用短语模板卡片 (AC-1 & AC-3)
-            if (item.isSnippet) {
-              return (
-                <div
-                  key={`snippet-${item.id}`}
-                  className={`panel-item snippet-item ${isSelected ? "selected" : ""}`}
-                  onClick={() => handlePasteSnippet(item.id)}
-                  onMouseEnter={() => {
-                    setSelectedIndex(index);
-                    setHoveredIndex(index);
-                  }}
-                  onMouseLeave={() => {
-                    if (hoveredIndex === index) {
-                      setHoveredIndex(null);
-                    }
-                  }}
-                >
-                  <div className="item-badge">
-                    {fastPasteIndex ? (
-                      <span className="badge-num">{fastPasteIndex}</span>
-                    ) : (
-                      <span className="badge-dot">•</span>
-                    )}
-                  </div>
-                  <div className="item-content">
-                    <div className="item-text-line">
-                      <span className="tag-snippet">[短语]</span>
-                      {item.shortcut && <span className="tag-shortcut">/{item.shortcut}</span>}
-                      <span className="snippet-title-text">{item.title}</span>
-                    </div>
-                    <div className="snippet-preview-text">
-                      {item.content.length > 90 ? item.content.slice(0, 90) + "..." : item.content}
-                    </div>
-                  </div>
-                  <div className="item-meta">
-                    {item.rawSnippet && (
-                      <>
-                        <button
-                          className="snippet-action-btn"
-                          onClick={(e) => handleOpenEditSnippet(item.rawSnippet!, e)}
-                          title="编辑短语"
-                        >
-                          ✏️
-                        </button>
-                        <button
-                          className="snippet-action-btn del"
-                          onClick={(e) => handleDeleteSnippet(item.id, e)}
-                          title="删除短语"
-                        >
-                          🗑️
-                        </button>
-                      </>
-                    )}
-                    <span className="item-len">模板</span>
-                  </div>
-                </div>
-              );
-            }
-
-            // 2. 图片多媒体卡片 (Issue #7)
-            if (item.entry_type === "image") {
-              const imgDetail = imageDetails[item.content];
-              const ocrText = ocrTextMap[item.id];
+      {/* ========================================================================= */}
+      {/* 工作区 (Workspace: 严格 28×28 槽位列表 + 即时抽屉检查器)                     */}
+      {/* ========================================================================= */}
+      <div className="panel-workspace">
+        <div className="panel-list" ref={listRef}>
+          {displayItems.length === 0 ? (
+            <div className="empty-state">
+              <p className="empty-title">
+                {query ? "未找到匹配条目" : activeTab === "snippets" ? "暂无常用短语模板" : "暂无剪贴板历史记录"}
+              </p>
+              <span className="empty-sub">
+                {query
+                  ? "支持拼音首字母简拼（如 wx / sfz）或模糊匹配，输入 / 唤出短语"
+                  : activeTab === "snippets"
+                  ? "点击上方 [+ 新建] 预置高频常用回复或动态模板"
+                  : "复制任意文本、代码或截屏图片后将自动捕获并在此显示"}
+              </span>
+            </div>
+          ) : (
+            displayItems.map((item, index) => {
+              const isSelected = index === selectedIndex;
+              const fastPasteIndex = index < 8 ? index + 1 : null;
               const isItemMultiSelected = selectedIds.includes(item.id);
+
+              // 敏感信息临时显露判断
+              const isSensitive = item.kind === "sensitive";
+              const isTemporarilyRevealed = isSensitive && temporaryRevealId === item.id;
+              const { displayText: maskedText } = maskSensitiveContent(item.content);
+              const previewContent = isSensitive && !isTemporarilyRevealed ? maskedText : item.content;
+
+              // 确定 28×28 槽位样式与图标
+              let slotClass = "slot-text";
+              let slotIcon: React.ReactNode = "📄";
+              let badgeLabel = "文本";
+              let badgeClass = "";
+
+              if (item.kind === "sensitive") {
+                slotClass = "slot-sensitive";
+                slotIcon = "🛡️";
+                badgeLabel = "防窥";
+                badgeClass = "badge-sensitive";
+              } else if (item.kind === "code") {
+                slotClass = "slot-code";
+                slotIcon = "</>";
+                badgeLabel = "代码";
+                badgeClass = "badge-code";
+              } else if (item.kind === "link") {
+                slotClass = "slot-link";
+                slotIcon = "🔗";
+                badgeLabel = "链接";
+                badgeClass = "badge-link";
+              } else if (item.kind === "image") {
+                slotClass = "slot-image";
+                const imgDetail = imageDetails[item.content];
+                slotIcon = imgDetail ? (
+                  <img src={imgDetail.data_url} alt="缩略图" />
+                ) : (
+                  "🖼️"
+                );
+                badgeLabel = "图片";
+                badgeClass = "badge-image";
+              } else if (item.kind === "snippet") {
+                slotClass = "slot-snippet";
+                slotIcon = "⚡";
+                badgeLabel = "短语";
+                badgeClass = "badge-snippet";
+              }
+
               return (
                 <div
-                  key={`entry-${item.id}`}
-                  className={`panel-item image-item ${isSelected ? "selected" : ""} ${item.is_pinned ? "pinned" : ""} ${isItemMultiSelected ? "multi-selected" : ""}`}
+                  key={`${item.isSnippet ? "s" : "e"}-${item.id}`}
+                  className={`panel-item ${isSelected ? "selected" : ""} ${item.is_pinned ? "pinned" : ""} ${
+                    isItemMultiSelected ? "multi-selected" : ""
+                  }`}
                   onClick={(e) => {
                     if (e.ctrlKey || e.metaKey || e.shiftKey) {
                       handleToggleSelectItem(item.id, e);
                     } else if (selectedIds.length > 0) {
                       handleToggleSelectItem(item.id, e);
                     } else {
-                      handlePaste(item.id);
+                      if (item.isSnippet) {
+                        handlePasteSnippet(item.id);
+                      } else {
+                        handlePaste(item.id);
+                      }
                     }
                   }}
-                  onMouseEnter={() => {
-                    setSelectedIndex(index);
-                    setHoveredIndex(index);
-                  }}
-                  onMouseLeave={() => {
-                    if (hoveredIndex === index) {
-                      setHoveredIndex(null);
-                    }
-                  }}
+                  onMouseEnter={() => setSelectedIndex(index)}
                 >
-                  <div
-                    className={`item-checkbox ${isItemMultiSelected ? "checked" : ""}`}
-                    onClick={(e) => handleToggleSelectItem(item.id, e)}
-                    title="勾选此项参与多选合并粘贴"
-                  >
-                    {isItemMultiSelected ? "✓" : ""}
-                  </div>
-                  <div className="item-badge">
-                    {item.is_pinned ? (
-                      <span className="badge-pin" title="置顶条目">📌</span>
-                    ) : fastPasteIndex ? (
-                      <span className="badge-num">{fastPasteIndex}</span>
+                  <div className="item-leading">
+                    {/* 1. 数字键帽 (20×20) */}
+                    {fastPasteIndex ? (
+                      <span className="item-keycap">{fastPasteIndex}</span>
                     ) : (
-                      <span className="badge-dot">•</span>
+                      <span className="item-keycap dot">•</span>
                     )}
-                  </div>
-                  <div className="item-image-wrapper">
-                    {imgDetail ? (
-                      <img
-                        src={imgDetail.data_url}
-                        alt="缩略图"
-                        className="item-thumbnail"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setSelectedIndex(index);
-                          setPreviewModalOpen(true);
-                        }}
-                        title="点击或按空格放大预览"
-                      />
-                    ) : (
-                      <div className="item-thumbnail placeholder">🖼️</div>
-                    )}
-                    <div className="item-image-meta">
-                      <div className="item-image-title">
-                        <span className="tag-image">🖼️ 图片</span>
-                        {ocrText && <span className="tag-ocr">OCR 提取</span>}
-                        <span>{imgDetail ? `${imgDetail.width} × ${imgDetail.height}` : "位图数据"}</span>
+
+                    {/* 多选复选框 */}
+                    {selectedIds.length > 0 && (
+                      <div
+                        className={`item-checkbox ${isItemMultiSelected ? "checked" : ""}`}
+                        onClick={(e) => handleToggleSelectItem(item.id, e)}
+                        title="勾选此项参与多选合并粘贴"
+                      >
+                        {isItemMultiSelected ? "✓" : ""}
                       </div>
-                      <div className="item-image-dims">
-                        {ocrText ? `提取文本: ${ocrText.slice(0, 36)}...` : `哈希: ${item.content.slice(0, 16)}... (按空格大图预览)`}
+                    )}
+
+                    {/* 2. 绝对固定 28×28 槽位 */}
+                    <div className={`item-slot ${slotClass}`}>{slotIcon}</div>
+
+                    {/* 3. 标题与单行等宽摘要 (严格水平对齐) */}
+                    <div className="item-content-box">
+                      <div className="item-title-row">
+                        <span className="item-title-text">{item.title}</span>
+                        <span className={`item-badge-type ${badgeClass}`}>{badgeLabel}</span>
+                        {item.shortcut && <span className="item-badge-type">/{item.shortcut}</span>}
+                        {item.is_pinned && <span className="item-pin-star" title="已置顶">★</span>}
+                      </div>
+                      <div className="item-snippet-snippet">
+                        {item.kind === "image"
+                          ? `[位图数据: ${imageDetails[item.content] ? `${imageDetails[item.content].width}×${imageDetails[item.content].height} • ${formatBytes(imageDetails[item.content].file_size)}` : "加载中..."}]`
+                          : previewContent}
                       </div>
                     </div>
                   </div>
-                  <div className="item-meta">
-                    <button
-                      className="action-btn"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setSelectedIndex(index);
-                        setActionSelectedIndex(0);
-                        setActionPaletteOpen(true);
-                      }}
-                      title="动作面板 (Ctrl+K / Tab)"
-                    >
-                      ⚡
-                    </button>
-                    <button
-                      className={`pin-btn ${item.is_pinned ? "active" : ""}`}
-                      onClick={(e) => handleTogglePin(item.id, e)}
-                      title={item.is_pinned ? "取消置顶" : "置顶条目 (Alt+P)"}
-                    >
-                      {item.is_pinned ? "📌" : "📍"}
-                    </button>
-                    <span className="item-len">
-                      {imgDetail ? formatBytes(imgDetail.file_size) : "图片"}
+
+                  {/* 列表项右侧状态与快捷动作 */}
+                  <div className="item-trailing">
+                    <span className="item-time-label">
+                      {item.kind === "image" && imageDetails[item.content]
+                        ? formatBytes(imageDetails[item.content].file_size)
+                        : formatRelativeTime(item.created_at)}
                     </span>
+                    <div className="item-hover-actions">
+                      <button
+                        className="quick-action-btn"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setSelectedIndex(index);
+                          setDrawerOpen(true);
+                        }}
+                        title="查看详细预览 (Space)"
+                      >
+                        Space 预览
+                      </button>
+                      <button
+                        className="quick-action-btn primary"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (item.isSnippet) {
+                            handlePasteSnippet(item.id);
+                          } else {
+                            handlePaste(item.id);
+                          }
+                        }}
+                        title="立即回填粘贴到当前活动窗口 (Enter)"
+                      >
+                        ↵ 回填
+                      </button>
+                    </div>
                   </div>
                 </div>
               );
-            }
+            })
+          )}
+        </div>
 
-            // 3. 纯文本条目卡片
-            const isLargeText = item.content.length > LARGE_TEXT_THRESHOLD;
-            const { displayText: maskedText, isSensitive } = maskSensitiveContent(item.content);
-            const isHovered = index === hoveredIndex;
-            const isRevealed = isSensitive && isHovered;
-            const activeText = isSensitive && !isRevealed ? maskedText : item.content;
-            const displayText = isLargeText ? activeText.slice(0, 300) + "..." : activeText;
-            const isItemMultiSelected = selectedIds.includes(item.id);
+        {/* ========================================================================= */}
+        {/* 即时抽屉检查器 (Quick Look Drawer - 按空格展开/收起)                        */}
+        {/* ========================================================================= */}
+        {drawerOpen && selectedItem && (
+          <aside className="panel-drawer">
+            <div>
+              <div className="drawer-header">
+                <div className="drawer-title-group">
+                  <span className="drawer-title">{selectedItem.title}</span>
+                  <span className="item-badge-type">{selectedItem.kind.toUpperCase()}</span>
+                </div>
+                <button
+                  className="drawer-close-btn"
+                  onClick={() => setDrawerOpen(false)}
+                  title="收起预览 (Space/Esc)"
+                >
+                  ✕
+                </button>
+              </div>
 
-            return (
-              <div
-                key={`entry-${item.id}`}
-                className={`panel-item ${isSelected ? "selected" : ""} ${item.is_pinned ? "pinned" : ""} ${isItemMultiSelected ? "multi-selected" : ""}`}
-                onClick={(e) => {
-                  if (e.ctrlKey || e.metaKey || e.shiftKey) {
-                    handleToggleSelectItem(item.id, e);
-                  } else if (selectedIds.length > 0) {
-                    handleToggleSelectItem(item.id, e);
+              <div className="drawer-body">
+                {/* 代码类型深度预览 */}
+                {selectedItem.kind === "code" && (
+                  <>
+                    <pre className="drawer-code-block">{selectedItem.content}</pre>
+                    <div className="drawer-actions-bar">
+                      <button
+                        className="drawer-mini-btn"
+                        onClick={() => {
+                          if (selectedItem.rawEntry) {
+                            executeAction(selectedItem.rawEntry, "json_prettify");
+                          }
+                        }}
+                      >
+                        ✨ 美化 JSON
+                      </button>
+                      <button
+                        className="drawer-mini-btn"
+                        onClick={() => {
+                          if (selectedItem.rawEntry) {
+                            executeAction(selectedItem.rawEntry, "json_minify");
+                          }
+                        }}
+                      >
+                        📦 压缩单行
+                      </button>
+                      <button
+                        className="drawer-mini-btn"
+                        onClick={() => {
+                          if (selectedItem.rawEntry) {
+                            executeAction(selectedItem.rawEntry, "plain_text");
+                          }
+                        }}
+                      >
+                        📄 复制纯文本
+                      </button>
+                    </div>
+                  </>
+                )}
+
+                {/* 链接类型深度预览 */}
+                {selectedItem.kind === "link" && (
+                  <div className="drawer-link-card">
+                    <span className="drawer-link-url">{selectedItem.content}</span>
+                    <button
+                      className="drawer-mini-btn"
+                      onClick={() => handleOpenLinkInBrowser(selectedItem.content)}
+                    >
+                      🌐 在默认浏览器中打开
+                    </button>
+                  </div>
+                )}
+
+                {/* 敏感信息防窥深度预览 */}
+                {selectedItem.kind === "sensitive" && (
+                  <div className="drawer-sensitive-card">
+                    <div style={{ fontWeight: 600, color: "#92400e" }}>🔒 敏感信息防护</div>
+                    <pre className="drawer-text-block">
+                      {temporaryRevealId === selectedItem.id
+                        ? selectedItem.content
+                        : maskSensitiveContent(selectedItem.content).displayText}
+                    </pre>
+                    <button
+                      className="drawer-mini-btn"
+                      onClick={() => handleRevealSensitive(selectedItem.id)}
+                    >
+                      👁️ 临时显露明文 (3秒自隐)
+                    </button>
+                  </div>
+                )}
+
+                {/* 图片与 OCR 深度预览 */}
+                {selectedItem.kind === "image" && (
+                  <>
+                    {imageDetails[selectedItem.content] && (
+                      <img
+                        src={imageDetails[selectedItem.content].data_url}
+                        alt="大图"
+                        className="drawer-image-preview"
+                        onClick={() => setPreviewModalOpen(true)}
+                        title="点击全屏放大"
+                      />
+                    )}
+                    <div className="drawer-actions-bar">
+                      <button
+                        className="drawer-mini-btn"
+                        onClick={() => handleOcr(selectedItem.id)}
+                        disabled={ocrLoading}
+                      >
+                        {ocrLoading ? "⏳ 识别中..." : "🔍 提取文字 (OCR)"}
+                      </button>
+                      <button className="drawer-mini-btn" onClick={() => setPreviewModalOpen(true)}>
+                        🔍 全屏放大预览
+                      </button>
+                    </div>
+                    {ocrTextMap[selectedItem.id] && (
+                      <div className="drawer-text-block">
+                        <strong>OCR 提取结果：</strong>
+                        <br />
+                        {ocrTextMap[selectedItem.id]}
+                      </div>
+                    )}
+                  </>
+                )}
+
+                {/* 常用短语模板预览 */}
+                {selectedItem.kind === "snippet" && (
+                  <div className="drawer-template-card">
+                    <div style={{ fontWeight: 600, color: "#6b21a8" }}>⚡ 动态变量解析</div>
+                    <pre className="drawer-text-block">{selectedItem.content}</pre>
+                    <div className="drawer-actions-bar">
+                      {selectedItem.rawSnippet && (
+                        <>
+                          <button
+                            className="drawer-mini-btn"
+                            onClick={(e) => handleOpenEditSnippet(selectedItem.rawSnippet!, e)}
+                          >
+                            ✏️ 编辑短语
+                          </button>
+                          <button
+                            className="drawer-mini-btn"
+                            onClick={(e) => handleDeleteSnippet(selectedItem.id, e)}
+                          >
+                            🗑️ 删除短语
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* 普通纯文本预览 */}
+                {selectedItem.kind === "text" && (
+                  <pre className="drawer-text-block">{selectedItem.content}</pre>
+                )}
+              </div>
+            </div>
+
+            <div className="drawer-footer">
+              <span>
+                行数: {selectedItem.content.split("\n").length} • 大小:{" "}
+                {formatBytes(selectedItem.content.length)}
+              </span>
+              <button
+                className="quick-action-btn primary"
+                onClick={() => {
+                  if (selectedItem.isSnippet) {
+                    handlePasteSnippet(selectedItem.id);
                   } else {
-                    handlePaste(item.id);
-                  }
-                }}
-                onMouseEnter={() => {
-                  setSelectedIndex(index);
-                  setHoveredIndex(index);
-                }}
-                onMouseLeave={() => {
-                  if (hoveredIndex === index) {
-                    setHoveredIndex(null);
+                    handlePaste(selectedItem.id);
                   }
                 }}
               >
-                <div
-                  className={`item-checkbox ${isItemMultiSelected ? "checked" : ""}`}
-                  onClick={(e) => handleToggleSelectItem(item.id, e)}
-                  title="勾选此项参与多选合并粘贴"
-                >
-                  {isItemMultiSelected ? "✓" : ""}
-                </div>
-                <div className="item-badge">
-                  {item.is_pinned ? (
-                    <span className="badge-pin" title="置顶条目">📌</span>
-                  ) : fastPasteIndex ? (
-                    <span className="badge-num">{fastPasteIndex}</span>
-                  ) : (
-                    <span className="badge-dot">•</span>
-                  )}
-                </div>
-                <div className="item-content">
-                  <div className="item-text-line">
-                    {isLargeText && <span className="tag-large">[超大文本]</span>}
-                    {isSensitive && (
-                      isRevealed ? (
-                        <span className="tag-revealed" title="鼠标悬停已临时显隐明文，回填仍输出真实原文">👁️ 临时显隐</span>
-                      ) : (
-                        <span className="tag-masked" title="敏感凭据已防窥脱敏，鼠标悬停可临时显隐明文">🔒 掩码保护</span>
-                      )
-                    )}
-                    <span className="item-text">{displayText}</span>
-                  </div>
-                </div>
-                <div className="item-meta">
-                  <button
-                    className="action-btn"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setSelectedIndex(index);
-                      setActionSelectedIndex(0);
-                      setActionPaletteOpen(true);
-                    }}
-                    title="动作面板 (Ctrl+K / Tab)"
-                  >
-                    ⚡
-                  </button>
-                  <button
-                    className={`pin-btn ${item.is_pinned ? "active" : ""}`}
-                    onClick={(e) => handleTogglePin(item.id, e)}
-                    title={item.is_pinned ? "取消置顶" : "置顶条目 (Alt+P)"}
-                  >
-                    {item.is_pinned ? "📌" : "📍"}
-                  </button>
-                  <span className="item-len">
-                    {isLargeText
-                      ? `${(item.content.length / (1024 * 1024)).toFixed(1)} MB`
-                      : `${item.content.length} 字符`}
-                  </span>
-                </div>
-              </div>
-            );
-          })
+                ↵ 粘贴 (Enter)
+              </button>
+            </div>
+          </aside>
         )}
       </div>
 
-      {/* 多选合并回填浮动工具栏 (AC-4) */}
+      {/* ========================================================================= */}
+      {/* 底部状态栏 (Bottom Status Bar - 34px)                                       */}
+      {/* ========================================================================= */}
+      <footer className="panel-footer-bar">
+        <div className="footer-left">
+          <span className="status-dot" />
+          <span style={{ fontWeight: 500 }}>监听就绪</span>
+          <span style={{ color: "#cbd5e1" }}>|</span>
+          <button
+            className={`queue-pill-btn ${queueStatus.is_active ? "active" : ""}`}
+            onClick={handleTogglePasteQueue}
+            title="快捷键: Alt+Shift+C"
+          >
+            {queueStatus.is_active ? `⚡ 连贴运行中 (${queueStatus.count}项)` : "连贴收集 (Alt+Shift+C)"}
+          </button>
+        </div>
+
+        <div className="footer-right">
+          <button
+            className="footer-action-palette-btn"
+            onClick={() => {
+              if (selectedItem && !selectedItem.isSnippet) {
+                setActionSelectedIndex(0);
+                setActionPaletteOpen(true);
+              }
+            }}
+            title="快捷格式转换 (Tab / Ctrl+K)"
+          >
+            <span>⚡ Tab 动作面板</span>
+          </button>
+
+          <div className="footer-nav-hints">
+            <span>↑↓ 导航</span>
+            <span>Space 预览</span>
+            <span>↵ 回填</span>
+          </div>
+        </div>
+      </footer>
+
+      {/* ========================================================================= */}
+      {/* 多选合并回填浮动工具栏                                                     */}
+      {/* ========================================================================= */}
       {selectedIds.length > 1 && (
         <div className="multi-select-toolbar">
           <div className="multi-select-info">
             <span className="multi-select-badge">{selectedIds.length}</span>
-            <span>已选择 {selectedIds.length} 项 (按 Enter 换行合并粘贴，Esc 取消选择)</span>
+            <span>已选 {selectedIds.length} 项 (按 Enter 换行合并粘贴，Esc 取消)</span>
           </div>
           <div className="multi-select-actions">
-            <button
-              className="multi-btn primary"
-              onClick={() => handlePasteMultiple(selectedIds)}
-              title="按换行符合并粘贴到当前活动窗口"
-            >
+            <button className="multi-btn primary" onClick={() => handlePasteMultiple(selectedIds)}>
               ↵ 换行合并粘贴
             </button>
-            <button
-              className="multi-btn"
-              onClick={() => setSelectedIds([])}
-              title="取消多选 (Esc)"
-            >
+            <button className="multi-btn" onClick={() => setSelectedIds([])}>
               取消
             </button>
           </div>
         </div>
       )}
 
-      {/* 队列连贴屏幕右下角计数胶囊 (Capsule HUD - AC-1, AC-2, AC-3) */}
-      {queueStatus.is_active && (
-        <div className="capsule-hud">
-          <div className="capsule-hud-main">
-            <div className="capsule-hud-header">
-              <span className="capsule-pulse-dot" />
-              <span className="capsule-hud-title">📥 连贴模式</span>
-              <span className="capsule-hud-count">{queueStatus.count} 项</span>
-            </div>
-            <div className="capsule-hud-sub">
-              {queueStatus.count > 0 ? (
-                <span>目标窗口连按 <kbd>Ctrl+V</kbd> 依次回填 (FIFO)</span>
-              ) : (
-                <span>等待复制入队，清空自动退出</span>
-              )}
-            </div>
-          </div>
-          <div className="capsule-hud-buttons">
-            {queueStatus.count > 0 && (
-              <button
-                className="capsule-action-btn pop"
-                onClick={handlePasteQueuePop}
-                title="手动回填下一项"
-              >
-                回填
-              </button>
-            )}
-            <button
-              className="capsule-action-btn stop"
-              onClick={handleStopPasteQueue}
-              title="退出连贴模式 (Alt+Shift+C)"
-            >
-              退出
-            </button>
-          </div>
-        </div>
-      )}
-
-      {actionPaletteOpen && displayItems[selectedIndex]?.rawEntry && (
-        <div
-          className="action-palette-overlay"
-          onClick={() => setActionPaletteOpen(false)}
-        >
-          <div
-            className="action-palette"
-            onClick={(e) => e.stopPropagation()}
-          >
+      {/* ========================================================================= */}
+      {/* 动作调色板浮层 (Action Palette - Tab / Ctrl+K)                              */}
+      {/* ========================================================================= */}
+      {actionPaletteOpen && selectedItem?.rawEntry && (
+        <div className="action-palette-overlay" onClick={() => setActionPaletteOpen(false)}>
+          <div className="action-palette" onClick={(e) => e.stopPropagation()}>
             <div className="palette-header">
               <div className="palette-title">
-                <span>⚡ 动作面板 (Action Palette)</span>
+                <span>⚡ 格式清洗与动作调色板 (Action Palette)</span>
               </div>
               {transformError ? (
                 <div className="palette-error">⚠️ {transformError}</div>
               ) : (
-                <div className="palette-sub">
-                  目标条目: {displayItems[selectedIndex].entry_type === "image" ? `[图片] ${displayItems[selectedIndex].content.slice(0, 32)}...` : `${displayItems[selectedIndex].content.slice(0, 48).replace(/\n/g, " ")}...`}
-                </div>
+                <div className="palette-sub">目标: {selectedItem.title}</div>
               )}
             </div>
             <div className="palette-list">
-              {(displayItems[selectedIndex].entry_type === "image" ? IMAGE_ACTIONS : TRANSFORM_ACTIONS).map((action, idx) => {
+              {(selectedItem.kind === "image" ? IMAGE_ACTIONS : TRANSFORM_ACTIONS).map((action, idx) => {
                 const isActionSelected = idx === actionSelectedIndex;
                 return (
                   <div
                     key={action.key}
                     className={`palette-item ${isActionSelected ? "selected" : ""}`}
                     onClick={() => {
-                      const entry = displayItems[selectedIndex].rawEntry;
-                      if (entry) executeAction(entry, action.key);
+                      if (selectedItem.rawEntry) executeAction(selectedItem.rawEntry, action.key);
                     }}
                     onMouseEnter={() => setActionSelectedIndex(idx)}
                   >
@@ -1571,88 +1757,55 @@ export const App: React.FC = () => {
               })}
             </div>
             <div className="palette-footer">
-              <span><kbd>↵</kbd> / <kbd>1~8</kbd> 执行并回填</span>
-              <span><kbd>Esc</kbd> 取消返回</span>
+              <span>
+                <kbd>↵</kbd> / <kbd>1~8</kbd> 执行并回填
+              </span>
+              <span>
+                <kbd>Esc</kbd> 取消返回
+              </span>
             </div>
           </div>
         </div>
       )}
 
-      {previewModalOpen && displayItems[selectedIndex]?.entry_type === "image" && (
-        <div
-          className="image-preview-overlay"
-          onClick={() => setPreviewModalOpen(false)}
-        >
-          <div
-            className="image-preview-modal"
-            onClick={(e) => e.stopPropagation()}
-          >
+      {/* ========================================================================= */}
+      {/* 大图全屏预览弹窗                                                           */}
+      {/* ========================================================================= */}
+      {previewModalOpen && selectedItem?.kind === "image" && (
+        <div className="image-preview-overlay" onClick={() => setPreviewModalOpen(false)}>
+          <div className="image-preview-modal" onClick={(e) => e.stopPropagation()}>
             <div className="image-preview-header">
               <div className="image-preview-title">
-                <span>🖼️ 图片大图放大预览</span>
+                <span>🖼️ 位图高清大图预览</span>
               </div>
-              <button
-                className="image-preview-close"
-                onClick={() => setPreviewModalOpen(false)}
-              >
+              <button className="image-preview-close" onClick={() => setPreviewModalOpen(false)}>
                 ✕
               </button>
             </div>
-            <div className="image-preview-body">
-              {imageDetails[displayItems[selectedIndex].content] && (
+            <div className="image-preview-body" style={{ padding: 16, textAlign: "center" }}>
+              {imageDetails[selectedItem.content] && (
                 <img
-                  src={imageDetails[displayItems[selectedIndex].content].data_url}
+                  src={imageDetails[selectedItem.content].data_url}
                   alt="大图预览"
-                  className="image-preview-img"
+                  style={{ maxWidth: "100%", maxHeight: "60vh", borderRadius: 8 }}
                 />
               )}
-              {ocrTextMap[displayItems[selectedIndex].id] && (
-                <div className="ocr-result-container">
-                  <div className="ocr-header">
-                    <span>🔍 离线 OCR 提取文本：</span>
-                    <button
-                      className="preview-action-btn"
-                      onClick={() => handlePasteCustomText(ocrTextMap[displayItems[selectedIndex].id])}
-                      title="粘贴提取文本"
-                    >
-                      📄 回填文本
-                    </button>
-                  </div>
-                  <div className="ocr-text-view">
-                    {ocrTextMap[displayItems[selectedIndex].id]}
-                  </div>
-                </div>
-              )}
             </div>
-            <div className="image-preview-footer">
-              <div className="image-preview-info">
-                {imageDetails[displayItems[selectedIndex].content] && (
-                  <>
-                    <span>尺寸: {imageDetails[displayItems[selectedIndex].content].width} × {imageDetails[displayItems[selectedIndex].content].height} 像素</span>
-                    <span>大小: {formatBytes(imageDetails[displayItems[selectedIndex].content].file_size)}</span>
-                  </>
-                )}
-              </div>
-              <div className="image-preview-actions">
-                <button
-                  className="preview-action-btn"
-                  onClick={() => handleOcr(displayItems[selectedIndex].id)}
-                  disabled={ocrLoading}
-                >
-                  {ocrLoading ? "⏳ 识别中..." : "🔍 提取文字 (OCR)"}
-                </button>
-                <button
-                  className="preview-action-btn primary"
-                  onClick={() => handlePaste(displayItems[selectedIndex].id)}
-                >
-                  ↵ 极速回填图片
-                </button>
-              </div>
+            <div className="snippet-modal-footer">
+              <button className="btn-cancel" onClick={() => setPreviewModalOpen(false)}>
+                关闭
+              </button>
+              <button className="btn-primary" onClick={() => handlePaste(selectedItem.id)}>
+                ↵ 粘贴图片
+              </button>
             </div>
           </div>
         </div>
       )}
 
+      {/* ========================================================================= */}
+      {/* 常用短语新建/编辑模态框                                                    */}
+      {/* ========================================================================= */}
       {snippetModalOpen && (
         <div className="snippet-modal-overlay" onClick={() => setSnippetModalOpen(false)}>
           <div className="snippet-modal" onClick={(e) => e.stopPropagation()}>
@@ -1665,15 +1818,17 @@ export const App: React.FC = () => {
               </button>
             </div>
             <div className="snippet-modal-body">
-              {snippetFormError && <div className="modal-error">⚠️ {snippetFormError}</div>}
+              {snippetFormError && <div className="palette-error">⚠️ {snippetFormError}</div>}
               <div className="form-group">
-                <label className="form-label">短语标题 <span className="req">*</span></label>
+                <label className="form-label">
+                  短语标题 <span className="req">*</span>
+                </label>
                 <input
                   type="text"
                   className="form-input"
                   value={snippetTitle}
                   onChange={(e) => setSnippetTitle(e.target.value)}
-                  placeholder="例如: 今日站会汇报、常用联系信息"
+                  placeholder="例如: 站会汇报模板、常用联系方式"
                   autoFocus
                 />
               </div>
@@ -1686,36 +1841,24 @@ export const App: React.FC = () => {
                     className="form-input shortcut-input"
                     value={snippetShortcut}
                     onChange={(e) => setSnippetShortcut(e.target.value)}
-                    placeholder="如 meet、info、ref"
+                    placeholder="如 meet、info、cr"
                   />
                 </div>
               </div>
               <div className="form-group">
-                <div className="form-label-row">
-                  <label className="form-label">模板内容 <span className="req">*</span></label>
-                  <span className="form-tip">点击插入动态占位符变量</span>
-                </div>
+                <label className="form-label">模板内容 <span className="req">*</span></label>
                 <div className="placeholder-toolbar">
-                  <button type="button" className="ph-btn" onClick={() => insertPlaceholder("{current_date}")} title="当前日期 (YYYY-MM-DD)">
+                  <button type="button" className="ph-btn" onClick={() => insertPlaceholder("{current_date}")}>
                     + &#123;current_date&#125;
                   </button>
-                  <button type="button" className="ph-btn" onClick={() => insertPlaceholder("{time}")} title="当前时间 (HH:mm:ss)">
+                  <button type="button" className="ph-btn" onClick={() => insertPlaceholder("{time}")}>
                     + &#123;time&#125;
                   </button>
-                  <button type="button" className="ph-btn" onClick={() => insertPlaceholder("{datetime}")} title="完整时间 (YYYY-MM-DD HH:mm:ss)">
+                  <button type="button" className="ph-btn" onClick={() => insertPlaceholder("{datetime}")}>
                     + &#123;datetime&#125;
                   </button>
-                  <button type="button" className="ph-btn" onClick={() => insertPlaceholder("{clipboard}")} title="展开时嵌入当前系统剪贴板文本">
+                  <button type="button" className="ph-btn" onClick={() => insertPlaceholder("{clipboard}")}>
                     + &#123;clipboard&#125;
-                  </button>
-                  <button type="button" className="ph-btn" onClick={() => insertPlaceholder("{year}")} title="年份">
-                    + &#123;year&#125;
-                  </button>
-                  <button type="button" className="ph-btn" onClick={() => insertPlaceholder("{month}")} title="月份">
-                    + &#123;month&#125;
-                  </button>
-                  <button type="button" className="ph-btn" onClick={() => insertPlaceholder("{day}")} title="日">
-                    + &#123;day&#125;
                   </button>
                 </div>
                 <textarea
@@ -1724,7 +1867,7 @@ export const App: React.FC = () => {
                   rows={5}
                   value={snippetContent}
                   onChange={(e) => setSnippetContent(e.target.value)}
-                  placeholder="请输入短语内容模板。支持嵌入动态占位符，如：&#10;【{current_date} 站会汇报】&#10;1. 昨日进展：&#10;2. 今日计划："
+                  placeholder="请输入短语内容模板..."
                 />
               </div>
             </div>
@@ -1740,21 +1883,21 @@ export const App: React.FC = () => {
         </div>
       )}
 
-      {/* 系统设置与灾备管理模态框 (工单 #10 AC-2, AC-3, AC-4) */}
+      {/* ========================================================================= */}
+      {/* 系统设置与灾备管理模态框                                                   */}
+      {/* ========================================================================= */}
       {settingsModalOpen && (
         <div className="settings-overlay" onClick={() => setSettingsModalOpen(false)}>
           <div className="settings-modal" onClick={(e) => e.stopPropagation()}>
             <div className="settings-header">
               <div className="settings-title">
-                <span>⚙️</span>
-                <span>系统设置与灾备管理</span>
+                <span>⚙️ 系统设置与灾备管理</span>
               </div>
               <button className="settings-close-btn" onClick={() => setSettingsModalOpen(false)}>
                 ✕
               </button>
             </div>
             <div className="settings-body">
-              {/* 开机静默自启 */}
               <div className="settings-section">
                 <div className="settings-section-title">🚀 系统守护</div>
                 <div className="settings-row">
@@ -1762,23 +1905,14 @@ export const App: React.FC = () => {
                     <span className="settings-label">开机静默后台自启</span>
                     <span className="settings-desc">随系统开机在后台静默运行（进入托盘不弹窗）</span>
                   </div>
-                  <label className="settings-switch-label">
-                    <input
-                      type="checkbox"
-                      checked={autostartEnabled}
-                      onChange={handleToggleAutostart}
-                    />
-                    <span className="settings-slider" />
+                  <label>
+                    <input type="checkbox" checked={autostartEnabled} onChange={handleToggleAutostart} />
                   </label>
                 </div>
               </div>
 
-              {/* 灾备归档 (.clipbak) */}
               <div className="settings-section">
                 <div className="settings-section-title">📦 灾备归档 (.clipbak)</div>
-                <span className="settings-desc">
-                  完整导出或还原 SQLite 结构化数据与图片 Blobs 文件
-                </span>
                 <div className="backup-input-group">
                   <input
                     type="text"
@@ -1789,29 +1923,16 @@ export const App: React.FC = () => {
                   />
                 </div>
                 <div className="backup-btn-group">
-                  <button
-                    className="backup-action-btn export"
-                    disabled={backupLoading}
-                    onClick={handleExportBackup}
-                  >
+                  <button className="backup-action-btn" disabled={backupLoading} onClick={handleExportBackup}>
                     {backupLoading ? "处理中..." : "📤 一键导出备份"}
                   </button>
-                  <button
-                    className="backup-action-btn import"
-                    disabled={backupLoading}
-                    onClick={handleImportBackup}
-                  >
+                  <button className="backup-action-btn" disabled={backupLoading} onClick={handleImportBackup}>
                     {backupLoading ? "处理中..." : "📥 导入备份还原"}
                   </button>
                 </div>
-                {backupMsg && (
-                  <div className={`backup-feedback ${backupMsg.type}`}>
-                    {backupMsg.text}
-                  </div>
-                )}
+                {backupMsg && <div className={`backup-feedback ${backupMsg.type}`}>{backupMsg.text}</div>}
               </div>
 
-              {/* 清理维护 */}
               <div className="settings-section">
                 <div className="settings-section-title">🧹 清理维护</div>
                 <div className="settings-row">

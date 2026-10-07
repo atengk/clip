@@ -9,8 +9,21 @@
 _Avoid_: 记录, 剪切项, 数据片
 
 **Entry Type**:
-剪贴板条目的数据载荷分类，严格区分为纯文本（Text）、富文本（RichText）、位图图像（Image）与文件列表（Files）。
+剪贴板条目的数据载荷分类，对外呈现实用六大流线筛选维度：全部（All）、置顶（Pinned）、文本（Text）、图片（Image）、代码（Code，涵盖 JSON/YAML/HTML/SQL/脚本）、链接（Link）。
 _Avoid_: 格式, 种类
+
+**InstallerBranding**:
+基于 NSIS Modern UI 2 规范定制的高清浅色侧边栏与顶部导航品牌位图、中英双语自适应及免提权安装环境套件。
+_Avoid_: 安装包皮肤, 美化补丁
+
+**AppWindowBranding**:
+基于 Raycast / Spotlight 流线型单栏、可折叠即时预览抽屉、可视化动作清洗面板与清透浅色毛玻璃材质的无边框剪贴板悬浮主窗口设计体系。
+_Avoid_: 主题皮肤, 弹窗样式
+
+**LogoBranding**:
+基于现代拟物剪贴板（Layered Clipboard - 靛蓝紫底板、双层白纸卡片与金属银夹扣）的跨平台多分辨率矢量品牌标识母版体系。
+_Avoid_: 软件图标, 临时图标
+
 
 **Paste Simulator**:
 在检索悬浮窗隐藏后，负责将目标条目注入系统剪贴板并向上一个获得焦点的活动窗口发送模拟按键（如 `Ctrl + V` 或 `Cmd + V`）的核心服务。
@@ -108,3 +121,18 @@ _Avoid_: 暂存发布, 预发布
 由发布流水线在最终阶段聚合生成并挂载至 Release 资产的统一 SHA-256 哈希校验清单文件（`checksums.txt`）。
 _Avoid_: 散列文件, 签名文件
 
+**ReleaseAssetSpec**:
+全平台发布二进制资产的统一规范语义命名契约（`Clip-{Version}-{OS}-{Arch}[-Setup].{ext}`），屏蔽底层构建工具的碎片化默认输出。
+_Avoid_: 产物重命名, 资产名称
+
+**InstallerBranding**:
+Windows 平台基于 NSIS Modern UI 2 的现代浅色品牌化向导体系，包含中英双语自适应、当前用户免管理员提权（`%LOCALAPPDATA%\Programs\Clip`）真实展开、容量状态指示、全流程品牌位图与完成页快速上手指引。
+_Avoid_: 安装包美化, 安装脚本, Setup 界面
+
+**AppWindowBranding**:
+Clip 桌面悬浮主程序面板的无边框浅色流线型视觉规范，具备二层紧凑头部（高信息密度）、全槽位严格对齐、零开发黑话与完整键盘流操作闭环（`↑`/`↓`、`Space` 预览、`Enter` 回填、`Tab` 调色板）。
+_Avoid_: 主窗口设计, 悬浮窗皮肤, UI 外观
+
+**LogoBranding**:
+Clip 产品的唯一官方矢量视觉母版（现代拟物双层纯白纸张 + 科技紫蓝渐变底板 + 顶部银质金属夹扣），作为桌面图标、任务栏、托盘与安装向导位图的唯一派生源。
+_Avoid_: 软件图标, 图标素材, Logo 变体

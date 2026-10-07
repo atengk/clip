@@ -40,7 +40,7 @@ jobs:
         run: |
           IS_PRERELEASE=$([[ "${{ github.ref_name }}" == *"-"* ]] && echo "true" || echo "false")
           gh release create "${{ github.ref_name }}" \
-            --title "clip ${{ github.ref_name }}" \
+            --title "Clip ${{ github.ref_name }}" \
             --notes-file CHANGELOG_RELEASE.md \
             --draft \
             --prerelease=$IS_PRERELEASE
@@ -112,7 +112,7 @@ jobs:
           args: ${{ matrix.args }}
 
   # ============================================================================
-  # Stage 3: 生成全量产物哈希清单并正式发布 Release
+  # Stage 3: 全平台产物规范化重命名、SHA-256 清单编译与正式发布
   # ============================================================================
   publish-release:
     name: 聚合校验清单并正式发布 Release
@@ -122,19 +122,69 @@ jobs:
       - name: 检出源码
         uses: actions/checkout@v4
 
-      - name: 下载 Release 产物并生成 SHA-256 校验和清单
+      - name: 规范化全平台产物命名并生成 SHA-256 校验和清单
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          mkdir -p release-assets
-          cd release-assets
-          gh release download "${{ github.ref_name }}" --dir .
+          TAG="${{ github.ref_name }}"
+          VERSION="${TAG#v}"
+          echo "Target Release Version: ${VERSION}"
+
+          mkdir -p raw-assets normalized-assets
+          cd raw-assets
+          gh release download "$TAG" --dir .
+
+          for file in *; do
+            [ -f "$file" ] || continue
+            target=""
+            case "$file" in
+              *setup.exe|*Setup.exe|*.exe)
+                target="Clip-${VERSION}-Windows-x64-Setup.exe"
+                ;;
+              *.msi)
+                target="Clip-${VERSION}-Windows-x64.msi"
+                ;;
+              *.dmg)
+                target="Clip-${VERSION}-macOS-arm64.dmg"
+                ;;
+              *.app.tar.gz|*darwin*.tar.gz)
+                target="Clip-${VERSION}-macOS-arm64.app.tar.gz"
+                ;;
+              *.AppImage)
+                target="Clip-${VERSION}-Linux-x86_64.AppImage"
+                ;;
+              *.deb)
+                target="Clip-${VERSION}-Linux-amd64.deb"
+                ;;
+              *.rpm)
+                target="Clip-${VERSION}-Linux-x86_64.rpm"
+                ;;
+              checksums.txt)
+                continue
+                ;;
+              *)
+                target="$file"
+                ;;
+            esac
+
+            if [ -n "$target" ]; then
+              echo "Mapping: $file -> $target"
+              cp "$file" "../normalized-assets/$target"
+              if [ "$file" != "$target" ]; then
+                echo "Removing unnormalized asset from draft release: $file"
+                gh release delete-asset "$TAG" "$file" -y || true
+              fi
+            fi
+          done
+
+          cd ../normalized-assets
           if ls * 1> /dev/null 2>&1; then
-            sha256sum * > ../checksums.txt
-            cd ..
-            gh release upload "${{ github.ref_name }}" checksums.txt --clobber
+            echo "Compiling checksums.txt across normalized assets..."
+            sha256sum * > checksums.txt
+            sha256sum -c checksums.txt
+            gh release upload "$TAG" * --clobber
           else
-            cd ..
+            echo "Warning: No build assets found to normalize."
           fi
 
       - name: 将 Draft Release 切换为公开正式发布
