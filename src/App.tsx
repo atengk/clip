@@ -787,6 +787,15 @@ export const App: React.FC = () => {
     };
   }, []);
 
+  // 键盘漫游时确保高亮项目处于可见视口 (Issue #15)
+  useEffect(() => {
+    if (!listRef.current) return;
+    const items = listRef.current.children;
+    if (selectedIndex >= 0 && selectedIndex < items.length) {
+      (items[selectedIndex] as HTMLElement)?.scrollIntoView({ block: "nearest" });
+    }
+  }, [selectedIndex]);
+
   /**
    * 浏览器外链打开
    */
@@ -902,12 +911,12 @@ export const App: React.FC = () => {
           setPreviewModalOpen(false);
           return;
         }
-        if (drawerOpen) {
-          setDrawerOpen(false);
-          return;
-        }
         if (actionPaletteOpen) {
           setActionPaletteOpen(false);
+          return;
+        }
+        if (drawerOpen) {
+          setDrawerOpen(false);
           return;
         }
         if (settingsModalOpen) {
@@ -1040,11 +1049,11 @@ export const App: React.FC = () => {
         return;
       }
 
-      // 1~8 数字键极速单键粘贴：当搜索框无输入内容或非聚焦时直接触发，或者配合 Alt + 1~8 强制触发
+      // 1~8 数字键极速单键粘贴：非聚焦输入框时直接单键触发，输入框聚焦时需配合 Alt 组合键触发，保护原生打字
       const isNumberKey = e.key >= "1" && e.key <= "8";
       const shouldFastPasteNumber =
         (e.altKey && isNumberKey) ||
-        (isNumberKey && (!isInputFocused || query.length === 0));
+        (isNumberKey && !isInputFocused);
 
       if (shouldFastPasteNumber) {
         const num = parseInt(e.key, 10);
@@ -1112,7 +1121,6 @@ export const App: React.FC = () => {
     displayItems,
     selectedIndex,
     selectedIds,
-    query,
     drawerOpen,
     snippetModalOpen,
     actionPaletteOpen,
