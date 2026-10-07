@@ -519,3 +519,60 @@ pub fn clear_all_history(
     Ok(())
 }
 
+/// 获取当前配置的全局唤起快捷键
+///
+/// @param state 全局应用共享状态
+/// @return 当前生效的全局快捷键组合字符串 (如 "Alt+V")
+#[tauri::command]
+pub fn get_global_shortcut(state: State<'_, AppState>) -> Result<String, String> {
+    Ok(state.engine.get_global_shortcut())
+}
+
+/// 动态更新并重新注册全局唤起快捷键
+///
+/// 校验修饰键规则，注销旧快捷键并注册新快捷键；若冲突则回滚并友好报错。
+///
+/// @param app Tauri 应用程序句柄
+/// @param state 全局应用共享状态
+/// @param shortcut 新的快捷键组合字符串 (如 "Ctrl+Shift+V")
+/// @return 成功返回生效的快捷键字符串
+#[tauri::command]
+pub fn set_global_shortcut(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    shortcut: String,
+) -> Result<String, String> {
+    let clean = shortcut.trim();
+    if clean.is_empty() {
+        return Err("快捷键不能为空".to_string());
+    }
+
+    // 防御性校验：必须包含至少一个有效修饰键 (Ctrl / Alt / Shift / Super / Command)
+    let lower = clean.to_lowercase();
+    let has_modifier = lower.contains("ctrl")
+        || lower.contains("alt")
+        || lower.contains("shift")
+        || lower.contains("super")
+        || lower.contains("command")
+        || lower.contains("meta");
+
+    if !has_modifier {
+        return Err("快捷键必须包含至少一个修饰键 (Ctrl、Alt、Shift 或 Win)".to_string());
+    }
+
+    let old_shortcut = state.engine.get_global_shortcut();
+
+    // 动态注册新快捷键 (若被系统独占则在此阶段直接报错)
+    crate::update_main_shortcut(&app, clean, Some(&old_shortcut))?;
+
+    // 持久化保存至 SQLite
+    state
+        .engine
+        .set_global_shortcut(clean)
+        .map_err(|e| format!("保存快捷键配置失败: {e}"))?;
+
+    let _ = app.emit("global-shortcut-changed", clean);
+    Ok(clean.to_string())
+}
+
+

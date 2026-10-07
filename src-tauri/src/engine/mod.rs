@@ -528,6 +528,21 @@ impl ClipboardEngine {
         self.storage.search_snippets(query).map_err(EngineError::Storage)
     }
 
+    /// 获取全局唤起快捷键 (默认 Alt+V)
+    pub fn get_global_shortcut(&self) -> String {
+        self.storage
+            .get_metadata("global_shortcut")
+            .unwrap_or(None)
+            .unwrap_or_else(|| "Alt+V".to_string())
+    }
+
+    /// 持久化设置全局唤起快捷键
+    pub fn set_global_shortcut(&self, shortcut: &str) -> Result<(), EngineError> {
+        self.storage
+            .set_metadata("global_shortcut", shortcut)
+            .map_err(EngineError::Storage)
+    }
+
     /// 渲染并极速回填常用短语模板内容 (AC-2)
     ///
     /// 解析动态占位符（当前时间、日期、剪贴板等）并调用平台驱动回填展开后的真实文本。
@@ -1211,5 +1226,17 @@ mod tests {
         assert_eq!(restored_list[0].content, "Backup Entry 1");
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_engine_global_shortcut_config() {
+        let (_driver, engine) = setup_engine();
+
+        // 默认全局热键为 Alt+V
+        assert_eq!(engine.get_global_shortcut(), "Alt+V");
+
+        // 动态设置并持久化
+        engine.set_global_shortcut("Ctrl+Shift+V").unwrap();
+        assert_eq!(engine.get_global_shortcut(), "Ctrl+Shift+V");
     }
 }

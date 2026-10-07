@@ -553,6 +553,34 @@ impl Storage for SqliteStorage {
             Ok(list)
         }
     }
+
+    fn get_metadata(&self, key: &str) -> Result<Option<String>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT value FROM app_metadata WHERE key = ?1")
+            .map_err(|e| StorageError::DatabaseError(format!("准备查询配置失败: {e}")))?;
+        let mut rows = stmt
+            .query(params![key])
+            .map_err(|e| StorageError::DatabaseError(format!("执行查询配置失败: {e}")))?;
+        if let Some(row) = rows
+            .next()
+            .map_err(|e| StorageError::DatabaseError(format!("读取配置失败: {e}")))?
+        {
+            Ok(Some(row.get(0).map_err(|e| StorageError::DatabaseError(format!("解析配置失败: {e}")))?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn set_metadata(&self, key: &str, value: &str) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO app_metadata (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = ?2",
+            params![key, value],
+        )
+        .map_err(|e| StorageError::DatabaseError(format!("写入配置失败: {e}")))?;
+        Ok(())
+    }
 }
 
 /// 提取文本的简拼与全拼基础索引 (小写)
@@ -817,6 +845,27 @@ mod tests {
         let res_pinyin = storage.search_snippets("jrzh").unwrap();
         assert_eq!(res_pinyin.len(), 1);
         assert_eq!(res_pinyin[0].title, "今日站会汇报");
+    }
+
+    #[test]
+    fn test_sqlite_metadata_persistence() {
+        let storage = SqliteStorage::new_in_memory().unwrap();
+        // 初始不存在
+        assert_eq!(storage.get_metadata("global_shortcut").unwrap(), None);
+
+        // 写入并读取
+        storage.set_metadata("global_shortcut", "Alt+Shift+V").unwrap();
+        assert_eq!(
+            storage.get_metadata("global_shortcut").unwrap(),
+            Some("Alt+Shift+V".to_string())
+        );
+
+        // 覆盖更新 (ON CONFLICT DO UPDATE)
+        storage.set_metadata("global_shortcut", "Ctrl+Alt+V").unwrap();
+        assert_eq!(
+            storage.get_metadata("global_shortcut").unwrap(),
+            Some("Ctrl+Alt+V".to_string())
+        );
     }
 }
 

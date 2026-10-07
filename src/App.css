@@ -240,6 +240,14 @@ kbd {
   border-color: rgba(99, 102, 241, 0.4);
 }
 
+.header-action-btn.pin-btn.pinned {
+  background: #eff6ff;
+  color: #2563eb;
+  border-color: #93c5fd;
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(37, 99, 235, 0.12);
+}
+
 /* Row 2: 6 流线型分类过滤栏与统计提示 (34px) */
 .header-row-2 {
   display: flex;
@@ -1504,6 +1512,155 @@ kbd {
   background: #fee2e2;
   color: #b91c1c;
   border: 1px solid #fca5a5;
+}
+
+/* 全局快捷键与窗口交互管理样式 (GlobalShortcutManager / WindowPinning) */
+.shortcut-config-box {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.shortcut-current-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.shortcut-badge {
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--brand-primary);
+}
+
+.shortcut-recorder-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.shortcut-input-container {
+  position: relative;
+  flex: 1;
+  display: flex;
+  align-items: center;
+}
+
+.shortcut-record-input {
+  width: 100%;
+  padding: 6px 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 500;
+  color: #1e293b;
+  background: #ffffff;
+  outline: none;
+  transition: all 0.15s ease;
+  cursor: pointer;
+}
+
+.shortcut-record-input:focus,
+.shortcut-record-input.recording {
+  border-color: var(--brand-primary);
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2);
+  background: #faf5ff;
+}
+
+.recording-indicator {
+  position: absolute;
+  right: 10px;
+  font-size: 11px;
+  color: #ef4444;
+  font-weight: 600;
+  animation: pulse 1s infinite;
+  pointer-events: none;
+}
+
+.btn-shortcut-save {
+  padding: 6px 12px;
+  background: var(--brand-primary);
+  color: #ffffff;
+  border: none;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+
+.btn-shortcut-save:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-shortcut-reset {
+  padding: 6px 10px;
+  background: #f1f5f9;
+  color: #475569;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.btn-shortcut-reset:hover {
+  background: #e2e8f0;
+  color: #1e293b;
+}
+
+.shortcut-feedback-msg {
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+}
+
+.shortcut-feedback-msg.success {
+  background: #ecfdf5;
+  color: #047857;
+  border: 1px solid #a7f3d0;
+}
+
+.shortcut-feedback-msg.error {
+  background: #fee2e2;
+  color: #b91c1c;
+  border: 1px solid #fca5a5;
+}
+
+.btn-pin-toggle {
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 500;
+  border: 1px solid #cbd5e1;
+  background: #ffffff;
+  color: #475569;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.btn-pin-toggle:hover {
+  background: #f8fafc;
+  color: #1e293b;
+}
+
+.btn-pin-toggle.pinned {
+  background: #eff6ff;
+  color: #2563eb;
+  border-color: #93c5fd;
+  font-weight: 600;
 }
 
 /* -------------------------------------------------------------------------- */

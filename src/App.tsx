@@ -301,6 +301,21 @@ export const App: React.FC = () => {
   const [backupMsg, setBackupMsg] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [backupLoading, setBackupLoading] = useState<boolean>(false);
 
+  // 窗口钉住置顶 (WindowPinning) 与失焦自动隐藏保护
+  const [isPinned, setIsPinned] = useState<boolean>(() => {
+    return localStorage.getItem("clip_window_pinned") === "true";
+  });
+  const [autoHideOnBlur, setAutoHideOnBlur] = useState<boolean>(() => {
+    const saved = localStorage.getItem("clip_auto_hide_blur");
+    return saved !== null ? saved === "true" : true;
+  });
+
+  // 全局唤起热键状态 (GlobalShortcutManager)
+  const [globalShortcut, setGlobalShortcut] = useState<string>("Alt+V");
+  const [shortcutDraft, setShortcutDraft] = useState<string>("Alt+V");
+  const [isRecordingShortcut, setIsRecordingShortcut] = useState<boolean>(false);
+  const [shortcutFeedback, setShortcutFeedback] = useState<{ type: "success" | "error"; text: string } | null>(null);
+
   const inputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -561,6 +576,101 @@ export const App: React.FC = () => {
       console.error("设置开机自启失败:", err);
     }
   }, [autostartEnabled]);
+
+  /**
+   * 切换窗口钉住置顶状态 (WindowPinning)
+   */
+  const handleToggleWindowPin = useCallback(() => {
+    setIsPinned((prev) => {
+      const next = !prev;
+      localStorage.setItem("clip_window_pinned", String(next));
+      return next;
+    });
+  }, []);
+
+  /**
+   * 切换失焦自动隐藏行为
+   */
+  const handleToggleAutoHideOnBlur = useCallback(() => {
+    setAutoHideOnBlur((prev) => {
+      const next = !prev;
+      localStorage.setItem("clip_auto_hide_blur", String(next));
+      return next;
+    });
+  }, []);
+
+  /**
+   * 保存并动态注册新的全局唤起快捷键 (GlobalShortcutManager)
+   */
+  const handleSaveShortcut = useCallback(
+    async (targetShortcut: string) => {
+      try {
+        setShortcutFeedback(null);
+        const updated = await invoke<string>("set_global_shortcut", {
+          shortcut: targetShortcut,
+        });
+        setGlobalShortcut(updated);
+        setShortcutDraft(updated);
+        setIsRecordingShortcut(false);
+        setShortcutFeedback({
+          type: "success",
+          text: `全局快捷键已成功更新为：${updated}`,
+        });
+      } catch (err: any) {
+        const errMsg = typeof err === "string" ? err : err?.message || "快捷键设置失败";
+        setShortcutFeedback({ type: "error", text: errMsg });
+      }
+    },
+    []
+  );
+
+  /**
+   * 一键恢复默认全局快捷键 (Alt+V)
+   */
+  const handleResetDefaultShortcut = useCallback(async () => {
+    await handleSaveShortcut("Alt+V");
+  }, [handleSaveShortcut]);
+
+  /**
+   * 快捷键录制器键盘事件捕获
+   */
+  const handleShortcutKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    if (e.key === "Escape") {
+      setIsRecordingShortcut(false);
+      setShortcutDraft(globalShortcut);
+      return;
+    }
+
+    const modifiers: string[] = [];
+    if (e.ctrlKey) modifiers.push("Ctrl");
+    if (e.altKey) modifiers.push("Alt");
+    if (e.shiftKey) modifiers.push("Shift");
+    if (e.metaKey) modifiers.push("Super");
+
+    const key = e.key;
+    if (["Control", "Alt", "Shift", "Meta"].includes(key)) {
+      return;
+    }
+
+    let keyName = key.toUpperCase();
+    if (key === " ") keyName = "Space";
+    if (key.length === 1) keyName = key.toUpperCase();
+
+    if (modifiers.length === 0) {
+      setShortcutFeedback({
+        type: "error",
+        text: "必须包含至少一个修饰键 (Ctrl、Alt、Shift 或 Win)",
+      });
+      return;
+    }
+
+    const combined = [...modifiers, keyName].join("+");
+    setShortcutDraft(combined);
+    setShortcutFeedback(null);
+  };
 
   /**
    * 导出与恢复灾备归档
@@ -881,7 +991,22 @@ export const App: React.FC = () => {
       }, 20);
     });
 
+    invoke<string>("get_global_shortcut")
+      .then((sc) => {
+        setGlobalShortcut(sc);
+        setShortcutDraft(sc);
+      })
+      .catch((err) => console.error("获取全局快捷键失败:", err));
+
+    const unlistenShortcutChanged = listen<string>("global-shortcut-changed", (event) => {
+      setGlobalShortcut(event.payload);
+      setShortcutDraft(event.payload);
+    });
+
     const handleBlur = () => {
+      if (isPinned || !autoHideOnBlur) {
+        return;
+      }
       handleClose();
     };
     window.addEventListener("blur", handleBlur);
@@ -892,9 +1017,10 @@ export const App: React.FC = () => {
       unlistenIncognito.then((f) => f());
       unlistenRestored.then((f) => f());
       unlistenPanelShown.then((f) => f());
+      unlistenShortcutChanged.then((f) => f());
       window.removeEventListener("blur", handleBlur);
     };
-  }, [loadData, activeTab, query, handleClose]);
+  }, [loadData, activeTab, query, handleClose, isPinned, autoHideOnBlur]);
 
   // 全局键盘导航流闭环 (Issue #15)
   useEffect(() => {
@@ -1030,8 +1156,15 @@ export const App: React.FC = () => {
         }
       }
 
-      // Alt + P: 置顶/取消置顶
+      // Alt + P: 钉住/取消钉住窗口 (WindowPinning)
       if (e.altKey && (e.key === "p" || e.key === "P")) {
+        e.preventDefault();
+        handleToggleWindowPin();
+        return;
+      }
+
+      // Ctrl + P: 置顶/取消置顶当前选中历史条目
+      if (e.ctrlKey && (e.key === "p" || e.key === "P")) {
         e.preventDefault();
         const current = displayItems[selectedIndex];
         if (current && !current.isSnippet) {
@@ -1133,6 +1266,7 @@ export const App: React.FC = () => {
     handleDispatchPaste,
     handleTransformAndPaste,
     handleTogglePin,
+    handleToggleWindowPin,
     handleOpenCreateSnippet,
     handleTabChange,
     executeAction,
@@ -1218,10 +1352,10 @@ export const App: React.FC = () => {
               <button
                 className={`segmented-btn ${activeTab === "history" ? "active" : ""}`}
                 onClick={() => handleTabChange("history")}
-                title="剪贴板历史模式 (Alt+V)"
+                title={`剪贴板历史模式 (${globalShortcut})`}
               >
                 <span>📋 历史</span>
-                <span className="pill-shortcut">Alt+V</span>
+                <span className="pill-shortcut">{globalShortcut}</span>
               </button>
               <button
                 className={`segmented-btn ${activeTab === "snippets" ? "active" : ""}`}
@@ -1240,7 +1374,7 @@ export const App: React.FC = () => {
               title="按空格键切换抽屉预览 (Space)"
             >
               <span>👁️</span>
-              <span>{drawerOpen ? "收起 (Space)" : "预览 (Space)"}</span>
+              <span>{drawerOpen ? "收起" : "预览"}</span>
             </button>
 
             {/* 新建短语按钮 (短语模式专属) */}
@@ -1250,24 +1384,14 @@ export const App: React.FC = () => {
               </button>
             )}
 
-            {/* 连贴队列开关 */}
+            {/* 📌 钉住/固定窗口按钮 (WindowPinning - Alt+P) */}
             <button
-              className={`header-action-btn ${queueStatus.is_active ? "active" : ""}`}
-              onClick={handleTogglePasteQueue}
-              title="切换队列连贴模式 (Alt+Shift+C)"
+              className={`header-action-btn pin-btn ${isPinned ? "active pinned" : ""}`}
+              onClick={handleToggleWindowPin}
+              title={isPinned ? "已固定窗口：点击外部程序不隐藏 (Alt+P)" : "固定窗口：保持悬浮不隐藏 (Alt+P)"}
             >
-              <span>📥</span>
-              <span>{queueStatus.is_active ? `${queueStatus.count}项` : "连贴"}</span>
-            </button>
-
-            {/* 隐身模式开关 */}
-            <button
-              className={`header-action-btn ${incognitoStatus.is_active ? "active" : ""}`}
-              onClick={() => handleToggleIncognito()}
-              title={incognitoStatus.is_active ? "已暂停记录，点击退出无痕" : "切换隐私无痕模式"}
-            >
-              <span>🕵️</span>
-              <span>{incognitoStatus.is_active ? "无痕中" : "无痕"}</span>
+              <span>📌</span>
+              <span>{isPinned ? "已固定" : "固定"}</span>
             </button>
 
             {/* 设置按钮 */}
@@ -1275,9 +1399,11 @@ export const App: React.FC = () => {
               className="header-action-btn"
               onClick={() => {
                 setSettingsModalOpen(true);
+                setDrawerOpen(false);
                 setBackupMsg(null);
+                setShortcutFeedback(null);
               }}
-              title="系统设置与灾备管理"
+              title="系统设置与快捷键管理"
             >
               <span>⚙️</span>
             </button>
@@ -1933,6 +2059,92 @@ export const App: React.FC = () => {
               </button>
             </div>
             <div className="settings-body">
+              {/* 1. 全局快捷键管理卡片 (GlobalShortcutManager) */}
+              <div className="settings-section">
+                <div className="settings-section-title">⌨️ 全局唤起快捷键</div>
+                <div className="settings-desc" style={{ marginBottom: "10px" }}>
+                  按下快捷键随时唤出/隐藏主面板。必须包含至少一个修饰键 (Ctrl、Alt、Shift、Win)。
+                </div>
+                <div className="shortcut-config-box">
+                  <div className="shortcut-current-row">
+                    <span className="settings-label">当前生效快捷键：</span>
+                    <kbd className="shortcut-badge">{globalShortcut}</kbd>
+                  </div>
+                  <div className="shortcut-recorder-row">
+                    <div className="shortcut-input-container">
+                      <input
+                        type="text"
+                        className={`shortcut-record-input ${isRecordingShortcut ? "recording" : ""}`}
+                        value={isRecordingShortcut ? (shortcutDraft ? `${shortcutDraft} (录制中...)` : "请按下组合键...") : shortcutDraft}
+                        placeholder="点击后按下按键组合 (如 Ctrl+Shift+V)"
+                        readOnly
+                        onFocus={() => {
+                          setIsRecordingShortcut(true);
+                          setShortcutFeedback(null);
+                        }}
+                        onBlur={() => setIsRecordingShortcut(false)}
+                        onKeyDown={handleShortcutKeyDown}
+                      />
+                      {isRecordingShortcut && <span className="recording-indicator">● 录制中</span>}
+                    </div>
+                    <button
+                      className="btn-shortcut-save"
+                      onClick={() => handleSaveShortcut(shortcutDraft)}
+                      disabled={shortcutDraft === globalShortcut}
+                    >
+                      保存生效
+                    </button>
+                    <button
+                      className="btn-shortcut-reset"
+                      onClick={handleResetDefaultShortcut}
+                      title="恢复默认快捷键 (Alt+V)"
+                    >
+                      恢复默认
+                    </button>
+                  </div>
+                  {shortcutFeedback && (
+                    <div className={`shortcut-feedback-msg ${shortcutFeedback.type}`}>
+                      {shortcutFeedback.type === "success" ? "✓ " : "⚠️ "}
+                      {shortcutFeedback.text}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* 2. 窗口行为与固定置顶 (WindowPinning) */}
+              <div className="settings-section">
+                <div className="settings-section-title">🪟 窗口交互行为</div>
+                <div className="settings-row">
+                  <div className="settings-label-group">
+                    <span className="settings-label">失去焦点时自动隐藏窗口</span>
+                    <span className="settings-desc">在未钉住状态下，点击外部其他程序或桌面时自动收起面板</span>
+                  </div>
+                  <label className="toggle-checkbox-label">
+                    <input
+                      type="checkbox"
+                      checked={autoHideOnBlur}
+                      onChange={handleToggleAutoHideOnBlur}
+                    />
+                  </label>
+                </div>
+                <div className="settings-row" style={{ marginTop: "10px" }}>
+                  <div className="settings-label-group">
+                    <span className="settings-label">窗口钉住/保持固定 (Alt+P)</span>
+                    <span className="settings-desc">
+                      {isPinned
+                        ? "🟢 当前已处于固定状态，点击任何外部程序窗口均常驻不消失"
+                        : "⚪ 未固定，窗口将在失焦时根据上方规则收起"}
+                    </span>
+                  </div>
+                  <button
+                    className={`btn-pin-toggle ${isPinned ? "pinned" : ""}`}
+                    onClick={handleToggleWindowPin}
+                  >
+                    {isPinned ? "📌 取消固定" : "📌 立即固定"}
+                  </button>
+                </div>
+              </div>
+
               <div className="settings-section">
                 <div className="settings-section-title">🚀 系统守护</div>
                 <div className="settings-row">
@@ -1943,6 +2155,20 @@ export const App: React.FC = () => {
                   <label>
                     <input type="checkbox" checked={autostartEnabled} onChange={handleToggleAutostart} />
                   </label>
+                </div>
+                <div className="settings-row" style={{ marginTop: "10px" }}>
+                  <div className="settings-label-group">
+                    <span className="settings-label">无痕私密模式</span>
+                    <span className="settings-desc">
+                      {incognitoStatus.is_active ? "🟢 当前无痕模式已启用，暂停记录所有新剪贴内容" : "⚪ 未开启，正常记录剪贴历史"}
+                    </span>
+                  </div>
+                  <button
+                    className={`btn-pin-toggle ${incognitoStatus.is_active ? "pinned" : ""}`}
+                    onClick={() => handleToggleIncognito()}
+                  >
+                    {incognitoStatus.is_active ? "退出无痕" : "进入无痕"}
+                  </button>
                 </div>
               </div>
 

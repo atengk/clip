@@ -121,6 +121,7 @@ fn test_tauri_conf_nsis_spec() {
     assert!(zh_content.contains("免管理员权限"), "中文目录提示必须包含免管理员权限安全说明");
     assert!(zh_content.contains("deleteAppData"), "中文必须配置 deleteAppData 提示默认安全保留");
     assert!(zh_content.contains("uninstPageTopText"), "中文必须配置 uninstPageTopText");
+    assert!(zh_content.contains("appRunningOkKill"), "中文必须配置 appRunningOkKill 避免卸载期空白弹窗");
 
     assert!(en_content.contains("launchClipNow"), "英文语言包必须包含 launchClipNow");
     assert!(en_content.contains("finishPageDescription"), "英文语言包必须包含 finishPageDescription");
@@ -129,4 +130,5 @@ fn test_tauri_conf_nsis_spec() {
     assert!(en_content.contains("No Elevation Required"), "英文目录提示必须包含免提权说明");
     assert!(en_content.contains("deleteAppData"), "英文必须配置 deleteAppData 提示默认安全保留");
     assert!(en_content.contains("uninstPageTopText"), "英文必须配置 uninstPageTopText");
+    assert!(en_content.contains("appRunningOkKill"), "英文必须配置 appRunningOkKill 避免卸载期空白弹窗");
 }

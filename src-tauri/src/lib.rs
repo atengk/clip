@@ -14,7 +14,7 @@ use crate::commands::clipboard::{
     import_backup, is_autostart_enabled, ocr_image_entry, paste_custom_text, paste_entry,
     paste_multiple_entries, paste_plain_entry, paste_queue_pop, paste_snippet, save_snippet,
     search_history, search_snippets, set_autostart, toggle_incognito, toggle_paste_queue,
-    toggle_pin, transform_and_paste_entry,
+    toggle_pin, transform_and_paste_entry, get_global_shortcut, set_global_shortcut,
 };
 use crate::commands::AppState;
 use crate::engine::ClipboardEngine;
@@ -237,46 +237,11 @@ pub fn run() {
                 }))
                 .expect("启动系统剪贴板监控失败");
 
-            // 5. 注册全局唤起快捷键 Alt + V
-            if let Ok(shortcut) = Shortcut::from_str("Alt+V") {
-                let app_handle_for_shortcut = app.handle().clone();
-                let _ = app
-                    .global_shortcut()
-                    .on_shortcut(shortcut, move |_app, _shortcut, event| {
-                        if event.state() == ShortcutState::Pressed {
-                            if let Some(window) = app_handle_for_shortcut.get_webview_window("main") {
-                                if let Ok(is_visible) = window.is_visible() {
-                                    if is_visible {
-                                        let _ = window.hide();
-                                    } else {
-                                        // 唤起前记录当前前台窗口句柄 (Windows)
-                                        #[cfg(windows)]
-                                        crate::pal::windows::WindowsPlatformDriver::capture_foreground_window();
-
-                                        // 在当前活动显示器中央偏上 (WindowAnchor) 精准定位
-                                        if let Ok(Some(monitor)) = window.current_monitor() {
-                                            let monitor_size = monitor.size();
-                                            let monitor_pos = monitor.position();
-                                            let win_size = window
-                                                .outer_size()
-                                                .unwrap_or(tauri::PhysicalSize::new(640, 460));
-                                            let x = monitor_pos.x
-                                                + ((monitor_size.width as i32 - win_size.width as i32) / 2);
-                                            let y = monitor_pos.y
-                                                + ((monitor_size.height as i32 - win_size.height as i32) / 4);
-                                            let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
-                                        } else {
-                                            let _ = window.center();
-                                        }
-
-                                        let _ = window.show();
-                                        let _ = window.set_focus();
-                                        let _ = app_handle_for_shortcut.emit("panel-shown", ());
-                                    }
-                                }
-                            }
-                        }
-                    });
+            // 5. 动态读取并注册全局唤起快捷键 (默认 Alt+V，支持数据库持久化与动态重绑)
+            let saved_shortcut = engine.get_global_shortcut();
+            if let Err(e) = update_main_shortcut(app.handle(), &saved_shortcut, None) {
+                eprintln!("初始化注册用户全局快捷键失败: {e}，正在尝试回退至 Alt+V");
+                let _ = update_main_shortcut(app.handle(), "Alt+V", None);
             }
 
             // 6. 注册连贴收集模式全局切换快捷键 Alt + Shift + C (AC-1)
@@ -397,11 +362,6 @@ pub fn run() {
 
             Ok(())
         })
-        .on_window_event(|window, event| {
-            if let tauri::WindowEvent::Focused(false) = event {
-                let _ = window.hide();
-            }
-        })
         .invoke_handler(tauri::generate_handler![
             get_history,
             search_history,
@@ -429,8 +389,73 @@ pub fn run() {
             import_backup,
             is_autostart_enabled,
             set_autostart,
-            clear_all_history
+            clear_all_history,
+            get_global_shortcut,
+            set_global_shortcut
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// 切换主程序悬浮面板显示/隐藏状态
+pub fn toggle_main_window(app_handle: &tauri::AppHandle) {
+    if let Some(window) = app_handle.get_webview_window("main") {
+        if let Ok(is_visible) = window.is_visible() {
+            if is_visible {
+                let _ = window.hide();
+            } else {
+                #[cfg(windows)]
+                crate::pal::windows::WindowsPlatformDriver::capture_foreground_window();
+
+                if let Ok(Some(monitor)) = window.current_monitor() {
+                    let monitor_size = monitor.size();
+                    let monitor_pos = monitor.position();
+                    let win_size = window
+                        .outer_size()
+                        .unwrap_or(tauri::PhysicalSize::new(640, 460));
+                    let x = monitor_pos.x
+                        + ((monitor_size.width as i32 - win_size.width as i32) / 2);
+                    let y = monitor_pos.y
+                        + ((monitor_size.height as i32 - win_size.height as i32) / 4);
+                    let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+                } else {
+                    let _ = window.center();
+                }
+
+                let _ = window.show();
+                let _ = window.set_focus();
+                let _ = app_handle.emit("panel-shown", ());
+            }
+        }
+    }
+}
+
+/// 动态注册或更新全局主面板呼出快捷键
+pub fn update_main_shortcut(
+    app_handle: &tauri::AppHandle,
+    new_shortcut_str: &str,
+    old_shortcut_str: Option<&str>,
+) -> Result<(), String> {
+    let new_shortcut = Shortcut::from_str(new_shortcut_str)
+        .map_err(|e| format!("快捷键格式无效: {e}"))?;
+
+    // 1. 若指定旧快捷键，先尝试注销
+    if let Some(old_str) = old_shortcut_str {
+        if let Ok(old_sc) = Shortcut::from_str(old_str) {
+            let _ = app_handle.global_shortcut().unregister(old_sc);
+        }
+    }
+
+    // 2. 绑定新快捷键事件监听
+    let app_handle_clone = app_handle.clone();
+    app_handle
+        .global_shortcut()
+        .on_shortcut(new_shortcut, move |_app, _sc, event| {
+            if event.state() == ShortcutState::Pressed {
+                toggle_main_window(&app_handle_clone);
+            }
+        })
+        .map_err(|e| format!("注册快捷键失败，可能已被系统或其他程序占用: {e}"))?;
+
+    Ok(())
 }

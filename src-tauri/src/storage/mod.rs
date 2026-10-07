@@ -184,5 +184,17 @@ pub trait Storage: Send + Sync {
     /// @param query 检索词 (如 "/meet" 或 "汇报")
     /// @return 匹配的短语列表
     fn search_snippets(&self, query: &str) -> Result<Vec<Snippet>, StorageError>;
+
+    /// 读取持久化应用配置元数据
+    ///
+    /// @param key 配置键名
+    /// @return 对应值，不存在返回 Ok(None)
+    fn get_metadata(&self, key: &str) -> Result<Option<String>, StorageError>;
+
+    /// 保存持久化应用配置元数据
+    ///
+    /// @param key 配置键名
+    /// @param value 配置键值
+    fn set_metadata(&self, key: &str, value: &str) -> Result<(), StorageError>;
 }
 
