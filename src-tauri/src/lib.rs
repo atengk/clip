@@ -15,6 +15,7 @@ use crate::commands::clipboard::{
     paste_multiple_entries, paste_plain_entry, paste_queue_pop, paste_snippet, save_snippet,
     search_history, search_snippets, set_autostart, toggle_incognito, toggle_paste_queue,
     toggle_pin, transform_and_paste_entry, get_global_shortcut, set_global_shortcut,
+    expand_to_full_window,
 };
 use crate::commands::AppState;
 use crate::engine::ClipboardEngine;
@@ -276,32 +277,36 @@ pub fn run() {
                 .show_menu_on_left_click(false)
                 .tooltip("clip")
                 .on_tray_icon_event(move |_tray, event| {
-                    if let TrayIconEvent::Click {
-                        button: MouseButton::Left,
-                        button_state: MouseButtonState::Up,
-                        ..
-                    } = event
-                    {
-                        if let Some(window) = app_for_tray.get_webview_window("main") {
-                            if let Ok(is_visible) = window.is_visible() {
-                                if is_visible {
-                                    let _ = window.hide();
-                                } else {
-                                    let _ = window.show();
-                                    let _ = window.set_focus();
+                    match event {
+                        TrayIconEvent::DoubleClick {
+                            button: MouseButton::Left,
+                            ..
+                        } => {
+                            show_full_window(&app_for_tray);
+                        }
+                        TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        } => {
+                            if let Some(window) = app_for_tray.get_webview_window("main") {
+                                if let Ok(is_visible) = window.is_visible() {
+                                    if is_visible {
+                                        crate::commands::clipboard::safe_hide_main_window(&app_for_tray);
+                                    } else {
+                                        show_full_window(&app_for_tray);
+                                    }
                                 }
                             }
                         }
+                        _ => {}
                     }
                 })
                 .on_menu_event(move |app_handle, event| {
                     let id_str = event.id().as_ref();
                     match id_str {
                         "show" => {
-                            if let Some(window) = app_handle.get_webview_window("main") {
-                                let _ = window.show();
-                                let _ = window.set_focus();
-                            }
+                            show_full_window(app_handle);
                         }
                         "toggle_incognito" => {
                             let _ = engine_for_tray.toggle_incognito(None);
@@ -391,40 +396,97 @@ pub fn run() {
             set_autostart,
             clear_all_history,
             get_global_shortcut,
-            set_global_shortcut
+            set_global_shortcut,
+            expand_to_full_window
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
 
+/// 展现完整 660×520 剪贴板管理大面板 (常规前台焦点模式)
+pub fn show_full_window(app_handle: &tauri::AppHandle) {
+    if let Some(window) = app_handle.get_webview_window("main") {
+        #[cfg(windows)]
+        {
+            crate::pal::windows::WindowsPlatformDriver::uninstall_popover_hooks();
+            if let Ok(hwnd) = window.hwnd() {
+                crate::pal::windows::WindowsPlatformDriver::remove_no_activate(hwnd.0 as isize);
+            }
+        }
+        let _ = window.set_size(tauri::PhysicalSize::new(
+            crate::pal::anchor::FULL_WINDOW_WIDTH as u32,
+            crate::pal::anchor::FULL_WINDOW_HEIGHT as u32,
+        ));
+        let _ = window.center();
+        let _ = window.show();
+        let _ = window.set_focus();
+        let _ = app_handle.emit("panel-shown", "full");
+    }
+}
+
 /// 切换主程序悬浮面板显示/隐藏状态
+///
+/// 默认采用紧凑光标吸附免失焦形态 (Non-Activating Compact Popover)，
+/// 贴靠正在输入的文本光标或鼠标指针，并阻断对宿主就地编辑态的破坏。
 pub fn toggle_main_window(app_handle: &tauri::AppHandle) {
     if let Some(window) = app_handle.get_webview_window("main") {
         if let Ok(is_visible) = window.is_visible() {
             if is_visible {
-                let _ = window.hide();
+                crate::commands::clipboard::safe_hide_main_window(app_handle);
             } else {
                 #[cfg(windows)]
                 crate::pal::windows::WindowsPlatformDriver::capture_foreground_window();
 
-                if let Ok(Some(monitor)) = window.current_monitor() {
-                    let monitor_size = monitor.size();
-                    let monitor_pos = monitor.position();
-                    let win_size = window
-                        .outer_size()
-                        .unwrap_or(tauri::PhysicalSize::new(640, 460));
-                    let x = monitor_pos.x
-                        + ((monitor_size.width as i32 - win_size.width as i32) / 2);
-                    let y = monitor_pos.y
-                        + ((monitor_size.height as i32 - win_size.height as i32) / 4);
+                const COMPACT_WIDTH: i32 = crate::pal::anchor::COMPACT_POPOVER_WIDTH;
+                const COMPACT_HEIGHT: i32 = crate::pal::anchor::COMPACT_POPOVER_HEIGHT;
+
+                #[cfg(windows)]
+                let (x, y) = crate::pal::windows::WindowsPlatformDriver::get_window_anchor_position(
+                    COMPACT_WIDTH,
+                    COMPACT_HEIGHT,
+                );
+                #[cfg(not(windows))]
+                let (x, y) = {
+                    if let Ok(Some(monitor)) = window.current_monitor() {
+                        let monitor_size = monitor.size();
+                        let monitor_pos = monitor.position();
+                        let px = monitor_pos.x + ((monitor_size.width as i32 - COMPACT_WIDTH) / 2);
+                        let py = monitor_pos.y + ((monitor_size.height as i32 - COMPACT_HEIGHT) / 4);
+                        (px, py)
+                    } else {
+                        (100, 100)
+                    }
+                };
+
+                #[cfg(windows)]
+                {
+                    if let Ok(hwnd) = window.hwnd() {
+                        crate::pal::windows::WindowsPlatformDriver::show_window_no_activate(
+                            hwnd.0 as isize,
+                            x,
+                            y,
+                            COMPACT_WIDTH,
+                            COMPACT_HEIGHT,
+                        );
+                        crate::pal::windows::WindowsPlatformDriver::install_popover_hooks(
+                            app_handle.clone(),
+                            hwnd.0 as isize,
+                        );
+                    } else {
+                        let _ = window.set_size(tauri::PhysicalSize::new(COMPACT_WIDTH as u32, COMPACT_HEIGHT as u32));
+                        let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+                        let _ = window.show();
+                    }
+                }
+                #[cfg(not(windows))]
+                {
+                    let _ = window.set_size(tauri::PhysicalSize::new(COMPACT_WIDTH as u32, COMPACT_HEIGHT as u32));
                     let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
-                } else {
-                    let _ = window.center();
+                    let _ = window.show();
+                    let _ = window.set_focus();
                 }
 
-                let _ = window.show();
-                let _ = window.set_focus();
-                let _ = app_handle.emit("panel-shown", ());
+                let _ = app_handle.emit("panel-shown", "compact");
             }
         }
     }

@@ -3,6 +3,7 @@
 //! @author Ateng
 //! @since 2026-10-06
 
+pub mod anchor;
 pub mod mock;
 #[cfg(windows)]
 pub mod windows;

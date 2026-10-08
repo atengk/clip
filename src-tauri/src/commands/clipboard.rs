@@ -68,6 +68,16 @@ pub fn toggle_pin(
 
 
 
+/// 安全隐藏主面板并清理 Popover 低级按键与鼠标拦截钩子
+pub fn safe_hide_main_window(app: &AppHandle) {
+    #[cfg(windows)]
+    crate::pal::windows::WindowsPlatformDriver::uninstall_popover_hooks();
+
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.hide();
+    }
+}
+
 /// 隐藏悬浮面板并将指定条目回填至前台原活动窗口
 ///
 /// 遵循极速回填契约：先隐藏面板释放焦点，再模拟键入 Ctrl+V。
@@ -81,10 +91,8 @@ pub fn paste_entry(
     state: State<'_, AppState>,
     id: i64,
 ) -> Result<(), String> {
-    // 1. 隐藏当前悬浮窗口并交还系统焦点
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.hide();
-    }
+    // 1. 安全隐藏当前悬浮窗口并交还系统焦点
+    safe_hide_main_window(&app);
 
     // 2. 预留 50ms 窗口调度等待，确保系统焦点已稳定切回原前台进程
     thread::sleep(Duration::from_millis(50));
@@ -117,9 +125,7 @@ pub fn transform_and_paste_entry(
         .map_err(|e| format!("{e}"))?;
 
     // 2. 校验成功后隐藏当前悬浮窗口并交还系统焦点
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.hide();
-    }
+    safe_hide_main_window(&app);
 
     // 3. 预留 50ms 窗口调度等待，确保系统焦点已稳定切回原前台进程
     thread::sleep(Duration::from_millis(50));
@@ -152,9 +158,16 @@ pub fn paste_plain_entry(
 /// @param app Tauri 应用程序句柄
 #[tauri::command]
 pub fn hide_window(app: AppHandle) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.hide();
-    }
+    safe_hide_main_window(&app);
+    Ok(())
+}
+
+/// 将光标吸附小浮窗平滑展开为 660×520 完整管理大面板
+///
+/// @param app Tauri 应用程序句柄
+#[tauri::command]
+pub fn expand_to_full_window(app: AppHandle) -> Result<(), String> {
+    crate::show_full_window(&app);
     Ok(())
 }
 
@@ -201,9 +214,7 @@ pub fn paste_custom_text(
     state: State<'_, AppState>,
     text: String,
 ) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.hide();
-    }
+    safe_hide_main_window(&app);
     thread::sleep(Duration::from_millis(50));
     state
         .engine
@@ -286,9 +297,7 @@ pub fn paste_snippet(
     state: State<'_, AppState>,
     id: i64,
 ) -> Result<String, String> {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.hide();
-    }
+    safe_hide_main_window(&app);
     thread::sleep(Duration::from_millis(50));
     state
         .engine
@@ -377,9 +386,7 @@ pub fn paste_multiple_entries(
     ids: Vec<i64>,
     separator: Option<String>,
 ) -> Result<String, String> {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.hide();
-    }
+    safe_hide_main_window(&app);
     thread::sleep(Duration::from_millis(50));
     let sep = separator.as_deref().unwrap_or("\n");
     state

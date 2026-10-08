@@ -90,6 +90,23 @@ impl MockPlatformDriver {
             cb();
         }
     }
+
+    /// 模拟测试根据锚点计算浮窗吸附坐标 (基于纯算法 Flip-fit)
+    pub fn calculate_popover_position(
+        &self,
+        anchor: crate::pal::anchor::AnchorPoint,
+        width: i32,
+        height: i32,
+        work_area: crate::pal::anchor::ScreenRect,
+    ) -> (i32, i32) {
+        crate::pal::anchor::calculate_flip_fit_position(
+            anchor,
+            width,
+            height,
+            work_area,
+            crate::pal::anchor::DEFAULT_ANCHOR_MARGIN,
+        )
+    }
 }
 
 impl Default for MockPlatformDriver {
@@ -215,5 +232,20 @@ mod tests {
         driver.simulate_ocr_result(Some("识别文字 2026"));
         let ocr = driver.ocr_image(b"dummy").unwrap();
         assert_eq!(ocr, "识别文字 2026");
+    }
+
+    #[test]
+    fn test_mock_platform_driver_popover_anchor() {
+        let driver = MockPlatformDriver::new();
+        let work_area = crate::pal::anchor::ScreenRect::new(0, 0, 1920, 1080);
+        let anchor = crate::pal::anchor::AnchorPoint::new(100, 200);
+        let (x, y) = driver.calculate_popover_position(
+            anchor,
+            crate::pal::anchor::COMPACT_POPOVER_WIDTH,
+            crate::pal::anchor::COMPACT_POPOVER_HEIGHT,
+            work_area,
+        );
+        assert_eq!(x, 100);
+        assert_eq!(y, 208);
     }
 }
