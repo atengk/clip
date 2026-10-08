@@ -1812,6 +1812,73 @@ kbd {
   border: 1px solid #fca5a5;
 }
 
+/* 快捷键中心全景速查卡片 (Shortcut Center Cheat Sheet) */
+.shortcuts-cheatsheet-card {
+  margin-top: 12px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.cheatsheet-category {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cheatsheet-cat-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-main);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.cheatsheet-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px 12px;
+}
+
+.cheatsheet-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #ffffff;
+  border: 1px solid #f1f5f9;
+  border-radius: 6px;
+  padding: 5px 8px;
+  font-size: 11px;
+}
+
+.cheatsheet-desc {
+  color: var(--text-muted);
+}
+
+.cheatsheet-kbd-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.cheatsheet-kbd-group kbd {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  background: #f1f5f9;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  padding: 1px 5px;
+  color: var(--text-main);
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.08);
+}
+
 .btn-pin-toggle {
   padding: 4px 10px;
   border-radius: 6px;

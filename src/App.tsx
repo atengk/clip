@@ -19,7 +19,7 @@ import "./App.css";
 /**
  * 当前客户端编译版本号 (SemVer)
  */
-export const CURRENT_VERSION = "v1.2.3";
+export const CURRENT_VERSION = "v1.2.4";
 
 /**
  * 存储状态与磁盘占用摘要信息契约 (遵循 Issue #19)
@@ -1710,15 +1710,10 @@ const MainPanel: React.FC = () => {
       }
 
       // 5. 顶层全局快捷键
-      // Ctrl + 1 / Ctrl + 2: 切换 Tab 模式
-      if (e.ctrlKey && e.key === "1") {
+      // Ctrl + Tab: 切换 Tab 模式 (历史记录 ↔ 常用短语)
+      if (e.ctrlKey && e.key === "Tab") {
         e.preventDefault();
-        handleTabChange("history");
-        return;
-      }
-      if (e.ctrlKey && e.key === "2") {
-        e.preventDefault();
-        handleTabChange("snippets");
+        handleTabChange(activeTab === "history" ? "snippets" : "history");
         return;
       }
 
@@ -1766,17 +1761,13 @@ const MainPanel: React.FC = () => {
         return;
       }
 
-      // 1~9 数字键极速粘贴与双轨路由：
-      // 1. 搜索框为空时（query.trim() === ""）：单按数字键 1~9 直接拦截输入并执行 Fast-Paste；
-      // 2. 搜索框有输入内容时：单按数字键正常打字检索，但配合 Ctrl+1~9 或 Alt+1~9 可快速回填对应序号项。
+      // Alt + 1~9: 规范化 Fast-Paste 极速回填 (零按键意图歧义，搜索框内数字输入完全保真)
+      // 非输入框聚焦态下，单按 1~9 亦支持快捷回填
       const isNumberKey = e.key >= "1" && e.key <= "9";
-      const isZeroQuery = query.trim() === "";
-      const isModifierNumber = (e.ctrlKey || e.altKey) && isNumberKey;
-      const shouldFastPasteNumber =
-        isModifierNumber ||
-        (isNumberKey && !e.ctrlKey && !e.altKey && !e.metaKey && (isZeroQuery || !isInputFocused));
+      const isAltFastPaste = e.altKey && !e.ctrlKey && !e.metaKey && isNumberKey;
+      const isNonInputFastPaste = !isInputFocused && !e.altKey && !e.ctrlKey && !e.metaKey && isNumberKey;
 
-      if (shouldFastPasteNumber) {
+      if (isAltFastPaste || isNonInputFastPaste) {
         const num = parseInt(e.key, 10);
         const targetItem = displayItems[num - 1];
         if (targetItem) {
@@ -2125,7 +2116,9 @@ const MainPanel: React.FC = () => {
                   <div className="item-leading">
                     {/* 1. 数字键帽 (20×20) */}
                     {fastPasteIndex ? (
-                      <span className="item-keycap">{fastPasteIndex}</span>
+                      <span className="item-keycap" title={`快捷粘贴: 按 Alt+${fastPasteIndex}`}>
+                        {fastPasteIndex}
+                      </span>
                     ) : (
                       <span className="item-keycap dot">•</span>
                     )}
@@ -2506,8 +2499,9 @@ const MainPanel: React.FC = () => {
           </button>
 
           <div className="footer-nav-hints">
-            <span>↑↓ 导航</span>
-            <span>Space 预览</span>
+            <span>Alt+1~9 直贴</span>
+            <span>↑↓ 漫游</span>
+            <span>Space 抽屉</span>
             <span>↵ 回填</span>
             <span>⇧↵ 纯文本</span>
           </div>
@@ -2735,15 +2729,15 @@ const MainPanel: React.FC = () => {
               </button>
             </div>
             <div className="settings-body">
-              {/* 1. 全局快捷键管理卡片 (GlobalShortcutManager) */}
+              {/* 1. 快捷键中心 (Shortcut Center) */}
               <div className="settings-section">
-                <div className="settings-section-title">⌨️ 全局唤起快捷键</div>
+                <div className="settings-section-title">⌨️ 快捷键中心</div>
                 <div className="settings-desc" style={{ marginBottom: "10px" }}>
-                  按下快捷键随时唤出/隐藏主面板。必须包含至少一个修饰键 (Ctrl、Alt、Shift、Win)。
+                  配置系统级全局唤起热键，并快速查阅面板内置高频交互快捷键全景图谱。
                 </div>
                 <div className="shortcut-config-box">
                   <div className="shortcut-current-row">
-                    <span className="settings-label">当前生效快捷键：</span>
+                    <span className="settings-label">系统全局唤起热键：</span>
                     <kbd className="shortcut-badge">{globalShortcut}</kbd>
                   </div>
                   <div className="shortcut-recorder-row">
@@ -2784,6 +2778,83 @@ const MainPanel: React.FC = () => {
                       {shortcutFeedback.text}
                     </div>
                   )}
+                </div>
+
+                {/* 交互快捷键全景速查卡片 (Cheat Sheet) */}
+                <div className="shortcuts-cheatsheet-card">
+                  <div className="cheatsheet-category">
+                    <span className="cheatsheet-cat-title">📋 极速粘贴与格式</span>
+                    <div className="cheatsheet-grid">
+                      <div className="cheatsheet-item">
+                        <span className="cheatsheet-desc">立即回填选中项</span>
+                        <div className="cheatsheet-kbd-group"><kbd>Enter</kbd></div>
+                      </div>
+                      <div className="cheatsheet-item">
+                        <span className="cheatsheet-desc">纯文本无格式粘贴</span>
+                        <div className="cheatsheet-kbd-group"><kbd>Shift</kbd> + <kbd>Enter</kbd></div>
+                      </div>
+                      <div className="cheatsheet-item">
+                        <span className="cheatsheet-desc">前 9 项极速直贴</span>
+                        <div className="cheatsheet-kbd-group"><kbd>Alt</kbd> + <kbd>1~9</kbd></div>
+                      </div>
+                      <div className="cheatsheet-item">
+                        <span className="cheatsheet-desc">连贴模式启动/暂停</span>
+                        <div className="cheatsheet-kbd-group"><kbd>Alt</kbd> + <kbd>Shift</kbd> + <kbd>C</kbd></div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="cheatsheet-category">
+                    <span className="cheatsheet-cat-title">🗂️ 列表导航与窗口</span>
+                    <div className="cheatsheet-grid">
+                      <div className="cheatsheet-item">
+                        <span className="cheatsheet-desc">上下漫游浏览历史</span>
+                        <div className="cheatsheet-kbd-group"><kbd>↑</kbd> / <kbd>↓</kbd></div>
+                      </div>
+                      <div className="cheatsheet-item">
+                        <span className="cheatsheet-desc">窗口钉住/保持固定</span>
+                        <div className="cheatsheet-kbd-group"><kbd>Alt</kbd> + <kbd>P</kbd></div>
+                      </div>
+                      <div className="cheatsheet-item">
+                        <span className="cheatsheet-desc">展开/收起详情抽屉</span>
+                        <div className="cheatsheet-kbd-group"><kbd>Space</kbd></div>
+                      </div>
+                      <div className="cheatsheet-item">
+                        <span className="cheatsheet-desc">唤出动作格式转换面板</span>
+                        <div className="cheatsheet-kbd-group"><kbd>Ctrl</kbd> + <kbd>K</kbd> / <kbd>Tab</kbd></div>
+                      </div>
+                      <div className="cheatsheet-item">
+                        <span className="cheatsheet-desc">切换历史与短语 Tab</span>
+                        <div className="cheatsheet-kbd-group"><kbd>Ctrl</kbd> + <kbd>Tab</kbd></div>
+                      </div>
+                      <div className="cheatsheet-item">
+                        <span className="cheatsheet-desc">逐级退出/隐藏面板</span>
+                        <div className="cheatsheet-kbd-group"><kbd>Esc</kbd></div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="cheatsheet-category">
+                    <span className="cheatsheet-cat-title">🛡️ 条目治理与多选</span>
+                    <div className="cheatsheet-grid">
+                      <div className="cheatsheet-item">
+                        <span className="cheatsheet-desc">物理删除单选/多选项</span>
+                        <div className="cheatsheet-kbd-group"><kbd>Delete</kbd></div>
+                      </div>
+                      <div className="cheatsheet-item">
+                        <span className="cheatsheet-desc">撤销删除 (3秒网)</span>
+                        <div className="cheatsheet-kbd-group"><kbd>Ctrl</kbd> + <kbd>Z</kbd></div>
+                      </div>
+                      <div className="cheatsheet-item">
+                        <span className="cheatsheet-desc">置顶/取消置顶条目</span>
+                        <div className="cheatsheet-kbd-group"><kbd>Ctrl</kbd> + <kbd>P</kbd></div>
+                      </div>
+                      <div className="cheatsheet-item">
+                        <span className="cheatsheet-desc">新建常用短语模板</span>
+                        <div className="cheatsheet-kbd-group"><kbd>Ctrl</kbd> + <kbd>N</kbd></div>
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </div>
 
