@@ -196,5 +196,13 @@ pub trait Storage: Send + Sync {
     /// @param key 配置键名
     /// @param value 配置键值
     fn set_metadata(&self, key: &str, value: &str) -> Result<(), StorageError>;
+
+    /// 获取数据库存储文件的实际文件路径（内存存储返回 None）
+    fn db_path(&self) -> Option<&std::path::Path> {
+        None
+    }
+
+    /// 获取数据库中的历史条目总数与常用短语总数
+    fn get_total_counts(&self) -> Result<(usize, usize), StorageError>;
 }
 

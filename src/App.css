@@ -1779,5 +1779,294 @@ kbd {
   background: var(--brand-primary);
 }
 
+/* -------------------------------------------------------------------------- */
+/* 数据存储与目录定位 (Issue #19)                                            */
+/* -------------------------------------------------------------------------- */
+.storage-path-text {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: #f1f5f9;
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid #e2e8f0;
+  color: var(--text-main);
+  max-width: 320px;
+  display: inline-block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.btn-storage-open {
+  background: #f8fafc;
+  border: 1px solid #cbd5e1;
+  color: var(--text-main);
+  padding: 5px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+
+.btn-storage-open:hover {
+  background: #e2e8f0;
+  border-color: #94a3b8;
+  color: var(--brand-primary);
+}
+
+.storage-stats-bar {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed #e2e8f0;
+}
+
+.storage-stat-pill {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 6px 4px;
+}
+
+.stat-pill-label {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-bottom: 2px;
+}
+
+.stat-pill-value {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-main);
+  font-family: var(--font-mono);
+}
+
+/* -------------------------------------------------------------------------- */
+/* 关于与版本更新检查 (Issue #19)                                            */
+/* -------------------------------------------------------------------------- */
+.version-pill {
+  display: inline-block;
+  background: #e0e7ff;
+  color: #4338ca;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 4px;
+  margin-left: 6px;
+  font-family: var(--font-mono);
+}
+
+.btn-update-check {
+  background: var(--brand-primary);
+  border: none;
+  color: #ffffff;
+  padding: 6px 14px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+
+.btn-update-check:hover:not(:disabled) {
+  opacity: 0.9;
+  transform: translateY(-1px);
+}
+
+.btn-update-check:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.update-feedback {
+  margin-top: 8px;
+  font-size: 11px;
+  padding: 6px 10px;
+  border-radius: 6px;
+}
+
+.update-feedback.success {
+  background: #ecfdf5;
+  color: #065f46;
+  border: 1px solid #a7f3d0;
+}
+
+.update-feedback.error {
+  background: #fef2f2;
+  color: #991b1b;
+  border: 1px solid #fecaca;
+}
+
+/* -------------------------------------------------------------------------- */
+/* 新版本更新提示模态框 (Issue #19)                                          */
+/* -------------------------------------------------------------------------- */
+.update-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.45);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  animation: fadeIn 0.15s ease-out;
+}
+
+.update-modal-card {
+  width: 520px;
+  max-width: 90vw;
+  max-height: 85vh;
+  background: #ffffff;
+  border-radius: 12px;
+  border: 1px solid #cbd5e1;
+  box-shadow: 0 20px 40px rgba(15, 23, 42, 0.22);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: scaleUp 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.update-modal-header {
+  height: 48px;
+  padding: 0 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid #e2e8f0;
+  background: #f8fafc;
+}
+
+.update-modal-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-main);
+}
+
+.update-new-version-badge {
+  background: #10b981;
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+}
+
+.update-modal-close-btn {
+  background: none;
+  border: none;
+  font-size: 16px;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+}
+
+.update-modal-close-btn:hover {
+  background: #e2e8f0;
+  color: var(--text-main);
+}
+
+.update-modal-body {
+  padding: 16px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.update-release-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-main);
+  margin-bottom: 4px;
+}
+
+.update-release-date {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+}
+
+.update-notes-container {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.update-notes-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-sub);
+  margin-bottom: 8px;
+}
+
+.update-notes-content {
+  font-family: var(--font-sans);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-main);
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.update-modal-footer {
+  height: 52px;
+  padding: 0 16px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  border-top: 1px solid #e2e8f0;
+  background: #f8fafc;
+}
+
+.btn-update-dismiss {
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  color: var(--text-main);
+  padding: 6px 14px;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.btn-update-dismiss:hover {
+  background: #f1f5f9;
+}
+
+.btn-update-download {
+  background: var(--brand-primary);
+  border: none;
+  color: #ffffff;
+  padding: 6px 16px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.btn-update-download:hover {
+  opacity: 0.9;
+  transform: translateY(-1px);
+}
+
 
 

@@ -84,6 +84,12 @@ fn test_seam1_core_engine_and_ipc_deterministic_regression() {
         snippets.iter().any(|s| s.title == "快捷问候"),
         "清空历史不影响常用短语模板库"
     );
+
+    // 8. 验证存储信息统计服务契约 (Issue #19)
+    let storage_info = engine.get_storage_info().expect("获取存储信息失败");
+    assert_eq!(storage_info.total_entries, 0);
+    assert!(storage_info.total_snippets >= 1);
+    assert_eq!(storage_info.db_path, ":memory:");
 }
 
 #[test]

@@ -15,6 +15,7 @@ use crate::commands::clipboard::{
     paste_multiple_entries, paste_plain_entry, paste_queue_pop, paste_snippet, save_snippet,
     search_history, search_snippets, set_autostart, toggle_incognito, toggle_paste_queue,
     toggle_pin, transform_and_paste_entry, get_global_shortcut, set_global_shortcut,
+    get_storage_info, open_storage_dir, select_backup_save_path, select_backup_open_path,
 };
 use crate::commands::AppState;
 use crate::engine::ClipboardEngine;
@@ -395,7 +396,11 @@ pub fn run() {
             set_autostart,
             clear_all_history,
             get_global_shortcut,
-            set_global_shortcut
+            set_global_shortcut,
+            get_storage_info,
+            open_storage_dir,
+            select_backup_save_path,
+            select_backup_open_path
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

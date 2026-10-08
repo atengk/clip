@@ -12,6 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// 基于 rusqlite 的本地 SQLite 存储引擎
 pub struct SqliteStorage {
     conn: Mutex<Connection>,
+    path: Option<std::path::PathBuf>,
 }
 
 impl SqliteStorage {
@@ -21,6 +22,7 @@ impl SqliteStorage {
             .map_err(|e| StorageError::DatabaseError(format!("打开内存 SQLite 失败: {e}")))?;
         let storage = Self {
             conn: Mutex::new(conn),
+            path: None,
         };
         storage.init_tables()?;
         Ok(storage)
@@ -28,10 +30,12 @@ impl SqliteStorage {
 
     /// 基于本地文件系统路径初始化 SQLite 数据库
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, StorageError> {
-        let conn = Connection::open(path)
+        let p_buf = path.as_ref().to_path_buf();
+        let conn = Connection::open(&p_buf)
             .map_err(|e| StorageError::DatabaseError(format!("打开文件 SQLite 失败: {e}")))?;
         let storage = Self {
             conn: Mutex::new(conn),
+            path: Some(p_buf),
         };
         storage.init_tables()?;
         Ok(storage)
@@ -580,6 +584,21 @@ impl Storage for SqliteStorage {
         )
         .map_err(|e| StorageError::DatabaseError(format!("写入配置失败: {e}")))?;
         Ok(())
+    }
+
+    fn db_path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
+    fn get_total_counts(&self) -> Result<(usize, usize), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let entries_count: usize = conn
+            .query_row("SELECT COUNT(*) FROM clipboard_entries", [], |row| row.get(0))
+            .unwrap_or(0);
+        let snippets_count: usize = conn
+            .query_row("SELECT COUNT(*) FROM snippets", [], |row| row.get(0))
+            .unwrap_or(0);
+        Ok((entries_count, snippets_count))
     }
 }
 

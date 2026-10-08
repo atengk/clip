@@ -143,3 +143,15 @@ _Avoid_: 快捷键设置, 按键监听器, 热键插件
 **In-place Renaming Compensator**:
 在 Windows 资源管理器或桌面文件重命名态下唤出剪贴板面板导致就地编辑失焦时，在回填时自动执行重激活与精准粘贴的补偿服务。
 _Avoid_: 重命名插件, 改名修复器
+
+**StorageInfoViewer**:
+向用户透明呈现当前持久化数据库与图片 Blob 目录物理路径、磁盘空间占用计算及支持一键在文件资源管理器中唤起定位的存储透视组件。
+_Avoid_: 文件路径器, 存储监视器
+
+**UpdateChecker**:
+基于 GitHub Releases 开放 API 校验客户端语义化版本、展示 Markdown 格式更新日志并引导跳转至官方下载渠道的轻量在线版本检查服务。
+_Avoid_: 自动更新插件, 升级程序
+
+**NativeFileDialog**:
+依赖操作系统内核原生 GUI 能力（如 Windows SaveFileDialog / OpenFileDialog）实现的免手动拼写文件路径的灾备归档导出与恢复交互体系。
+_Avoid_: 路径输入框, 自定义弹窗选择器

@@ -12,7 +12,36 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { maskSensitiveContent } from "./utils/privacy";
+import { compareSemVer, formatBytes } from "./utils/version";
 import "./App.css";
+
+/**
+ * 当前客户端编译版本号 (SemVer)
+ */
+export const CURRENT_VERSION = "v1.2.1";
+
+/**
+ * 存储状态与磁盘占用摘要信息契约 (遵循 Issue #19)
+ */
+export interface StorageInfo {
+  db_path: string;
+  db_size_bytes: number;
+  blob_dir: string;
+  blob_size_bytes: number;
+  total_entries: number;
+  total_snippets: number;
+}
+
+/**
+ * GitHub Release 最新发布信息契约
+ */
+export interface GitHubReleaseInfo {
+  tag_name: string;
+  name: string;
+  body: string;
+  published_at: string;
+  html_url: string;
+}
 
 /**
  * 敏感凭据临时显隐超时毫秒数
@@ -134,16 +163,6 @@ interface ImageDetail {
   file_size: number;
 }
 
-/**
- * 文件大小人性化格式化函数
- */
-function formatBytes(bytes: number): string {
-  if (!bytes || bytes <= 0) return "0 B";
-  const k = 1024;
-  const sizes = ["B", "KB", "MB", "GB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return `${(bytes / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`;
-}
 
 /**
  * 人性化相对时间显示函数
@@ -369,9 +388,18 @@ const MainPanel: React.FC = () => {
   // 设置模态框
   const [settingsModalOpen, setSettingsModalOpen] = useState<boolean>(false);
   const [autostartEnabled, setAutostartEnabled] = useState<boolean>(false);
-  const [backupPath, setBackupPath] = useState<string>("clip_backup.clipbak");
   const [backupMsg, setBackupMsg] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [backupLoading, setBackupLoading] = useState<boolean>(false);
+
+  // 存储信息状态 (Issue #19)
+  const [storageInfo, setStorageInfo] = useState<StorageInfo | null>(null);
+  const [copyPathFeedback, setCopyPathFeedback] = useState<boolean>(false);
+
+  // 在线更新检查状态 (Issue #19)
+  const [updateChecking, setUpdateChecking] = useState<boolean>(false);
+  const [updateInfo, setUpdateInfo] = useState<GitHubReleaseInfo | null>(null);
+  const [updateModalOpen, setUpdateModalOpen] = useState<boolean>(false);
+  const [updateFeedback, setUpdateFeedback] = useState<{ type: "success" | "error" | "info"; text: string } | null>(null);
 
   // 窗口钉住置顶 (WindowPinning) 与失焦自动隐藏保护
   const [isPinned, setIsPinned] = useState<boolean>(() => {
@@ -749,18 +777,99 @@ const MainPanel: React.FC = () => {
   };
 
   /**
-   * 导出与恢复灾备归档
+   * 刷新存储信息
+   */
+  const loadStorageInfo = useCallback(async () => {
+    try {
+      const info = await invoke<StorageInfo>("get_storage_info");
+      setStorageInfo(info);
+    } catch (err) {
+      console.error("获取存储信息失败:", err);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (settingsModalOpen) {
+      loadStorageInfo();
+    }
+  }, [settingsModalOpen, loadStorageInfo]);
+
+  /**
+   * 在操作系统文件资源管理器中打开存储目录
+   */
+  const handleOpenStorageDir = useCallback(async () => {
+    try {
+      await invoke("open_storage_dir");
+    } catch (err) {
+      console.error("打开存储目录失败:", err);
+    }
+  }, []);
+
+  /**
+   * 复制存储路径至剪贴板
+   */
+  const handleCopyStoragePath = useCallback((path: string) => {
+    if (!path) return;
+    navigator.clipboard.writeText(path);
+    setCopyPathFeedback(true);
+    setTimeout(() => setCopyPathFeedback(false), 2000);
+  }, []);
+
+  /**
+   * 检查在线 GitHub 发布版本
+   */
+  const handleCheckUpdate = useCallback(async (isManual = true) => {
+    setUpdateChecking(true);
+    setUpdateFeedback(null);
+    try {
+      const resp = await fetch("https://api.github.com/repos/atengk/clip/releases/latest", {
+        headers: { Accept: "application/vnd.github.v3+json" },
+      });
+      if (!resp.ok) {
+        throw new Error(`无法获取更新信息 (HTTP ${resp.status})`);
+      }
+      const data: GitHubReleaseInfo = await resp.json();
+      const hasNew = compareSemVer(CURRENT_VERSION, data.tag_name) > 0;
+      if (hasNew) {
+        setUpdateInfo(data);
+        setUpdateModalOpen(true);
+      } else {
+        if (isManual) {
+          setUpdateFeedback({
+            type: "success",
+            text: `当前已是最新版本 (${CURRENT_VERSION})`,
+          });
+        }
+      }
+    } catch (err: any) {
+      if (isManual) {
+        setUpdateFeedback({
+          type: "error",
+          text: `检查更新失败: ${err.message || err}`,
+        });
+      }
+    } finally {
+      setUpdateChecking(false);
+    }
+  }, []);
+
+  /**
+   * 唤起系统原生另存为对话框并执行备份导出 (Issue #19)
    */
   const handleExportBackup = useCallback(async () => {
-    if (!backupPath.trim()) return;
-    setBackupLoading(true);
     setBackupMsg(null);
     try {
-      const manifest = await invoke<BackupManifest>("export_backup", { path: backupPath.trim() });
+      const targetPath = await invoke<string | null>("select_backup_save_path");
+      if (!targetPath) {
+        return; // 用户取消另存为
+      }
+      setBackupLoading(true);
+      const manifest = await invoke<BackupManifest>("export_backup", { path: targetPath });
       setBackupMsg({
         type: "success",
-        text: `备份成功！包含 ${manifest.entry_count} 条历史，${manifest.snippet_count} 条短语，${manifest.blob_count} 个图片。`,
+        text: `✓ 备份导出成功！已归档 ${manifest.entry_count} 条历史、${manifest.snippet_count} 条常用短语及 ${manifest.blob_count} 个图片。`,
       });
+      loadStorageInfo();
     } catch (err) {
       setBackupMsg({
         type: "error",
@@ -769,19 +878,29 @@ const MainPanel: React.FC = () => {
     } finally {
       setBackupLoading(false);
     }
-  }, [backupPath]);
+  }, [loadStorageInfo]);
 
+  /**
+   * 唤起系统原生文件选择器并执行备份恢复 (Issue #19)
+   */
   const handleImportBackup = useCallback(async () => {
-    if (!backupPath.trim()) return;
-    setBackupLoading(true);
     setBackupMsg(null);
     try {
-      const manifest = await invoke<BackupManifest>("import_backup", { path: backupPath.trim() });
+      const sourcePath = await invoke<string | null>("select_backup_open_path");
+      if (!sourcePath) {
+        return; // 用户取消选择
+      }
+      if (!window.confirm(`确定要从以下归档文件恢复数据吗？\n\n${sourcePath}\n\n注意：此操作将合并导入归档中的历史记录与常用短语。`)) {
+        return;
+      }
+      setBackupLoading(true);
+      const manifest = await invoke<BackupManifest>("import_backup", { path: sourcePath });
       setBackupMsg({
         type: "success",
-        text: `恢复成功！已还原 ${manifest.entry_count} 条历史与 ${manifest.snippet_count} 条短语。`,
+        text: `✓ 恢复成功！已还原 ${manifest.entry_count} 条历史与 ${manifest.snippet_count} 条短语。`,
       });
       loadData(activeTab, query);
+      loadStorageInfo();
     } catch (err) {
       setBackupMsg({
         type: "error",
@@ -790,7 +909,7 @@ const MainPanel: React.FC = () => {
     } finally {
       setBackupLoading(false);
     }
-  }, [backupPath, loadData, activeTab, query]);
+  }, [loadData, activeTab, query, loadStorageInfo]);
 
   const handleClearAllHistory = useCallback(async () => {
     if (!window.confirm("确定要清空全部剪贴板历史记录和图片缓存吗？（常用短语将保留）")) {
@@ -2220,28 +2339,93 @@ const MainPanel: React.FC = () => {
                 </div>
               </div>
 
+              {/* 4. 数据存储与目录定位 (Issue #19) */}
+              <div className="settings-section">
+                <div className="settings-section-title">📂 数据存储与占用</div>
+                <div className="settings-row">
+                  <div className="settings-label-group">
+                    <span className="settings-label">存储数据目录</span>
+                    <span className="settings-desc">
+                      {storageInfo ? (
+                        <>
+                          <span className="storage-path-text" title={storageInfo.db_path}>
+                            {storageInfo.db_path}
+                          </span>
+                          <span style={{ marginLeft: "8px", color: "var(--brand-primary)", cursor: "pointer" }} onClick={() => handleCopyStoragePath(storageInfo.db_path)}>
+                            {copyPathFeedback ? "✓ 已复制" : "📋 复制"}
+                          </span>
+                        </>
+                      ) : (
+                        "正在计算数据存储位置..."
+                      )}
+                    </span>
+                  </div>
+                  <button className="btn-storage-open" onClick={handleOpenStorageDir} title="在 Windows 资源管理器中打开当前数据目录">
+                    📂 打开目录
+                  </button>
+                </div>
+                {storageInfo && (
+                  <div className="storage-stats-bar">
+                    <div className="storage-stat-pill">
+                      <span className="stat-pill-label">数据库</span>
+                      <span className="stat-pill-value">{formatBytes(storageInfo.db_size_bytes)}</span>
+                    </div>
+                    <div className="storage-stat-pill">
+                      <span className="stat-pill-label">图片缓存</span>
+                      <span className="stat-pill-value">{formatBytes(storageInfo.blob_size_bytes)}</span>
+                    </div>
+                    <div className="storage-stat-pill">
+                      <span className="stat-pill-label">历史记录</span>
+                      <span className="stat-pill-value">{storageInfo.total_entries} 条</span>
+                    </div>
+                    <div className="storage-stat-pill">
+                      <span className="stat-pill-label">常用短语</span>
+                      <span className="stat-pill-value">{storageInfo.total_snippets} 条</span>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* 5. 原生灾备归档 (.clipbak) (Issue #19) */}
               <div className="settings-section">
                 <div className="settings-section-title">📦 灾备归档 (.clipbak)</div>
-                <div className="backup-input-group">
-                  <input
-                    type="text"
-                    className="backup-input"
-                    value={backupPath}
-                    onChange={(e) => setBackupPath(e.target.value)}
-                    placeholder="备份文件路径 (如 clip_backup.clipbak)"
-                  />
+                <div className="settings-desc" style={{ marginBottom: "10px" }}>
+                  支持将历史剪贴板记录、图片 Blob 与常用短语完整归档打包与一键还原迁移。
                 </div>
                 <div className="backup-btn-group">
                   <button className="backup-action-btn" disabled={backupLoading} onClick={handleExportBackup}>
-                    {backupLoading ? "处理中..." : "📤 一键导出备份"}
+                    {backupLoading ? "导出中..." : "📤 一键导出备份 (另存为)"}
                   </button>
                   <button className="backup-action-btn" disabled={backupLoading} onClick={handleImportBackup}>
-                    {backupLoading ? "处理中..." : "📥 导入备份还原"}
+                    {backupLoading ? "导入中..." : "📥 导入备份还原 (合并)"}
                   </button>
                 </div>
                 {backupMsg && <div className={`backup-feedback ${backupMsg.type}`}>{backupMsg.text}</div>}
               </div>
 
+              {/* 6. 关于与版本更新 (Issue #19) */}
+              <div className="settings-section">
+                <div className="settings-section-title">🌐 关于与检查更新</div>
+                <div className="settings-row">
+                  <div className="settings-label-group">
+                    <span className="settings-label">
+                      Clip 剪贴板管理器 <span className="version-pill">{CURRENT_VERSION}</span>
+                    </span>
+                    <span className="settings-desc">极轻量、跨平台桌面剪贴板历史管理器 (Tauri v2 + React + Rust)</span>
+                  </div>
+                  <button className="btn-update-check" disabled={updateChecking} onClick={() => handleCheckUpdate(true)}>
+                    {updateChecking ? "检查中..." : "🔍 检查更新"}
+                  </button>
+                </div>
+                {updateFeedback && (
+                  <div className={`update-feedback ${updateFeedback.type}`}>
+                    {updateFeedback.type === "success" ? "✓ " : "⚠️ "}
+                    {updateFeedback.text}
+                  </div>
+                )}
+              </div>
+
+              {/* 7. 清理维护 */}
               <div className="settings-section">
                 <div className="settings-section-title">🧹 清理维护</div>
                 <div className="settings-row">
@@ -2254,6 +2438,51 @@ const MainPanel: React.FC = () => {
                   </button>
                 </div>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* 发现新版本更新提示模态框 (Issue #19)                                        */}
+      {/* ========================================================================= */}
+      {updateModalOpen && updateInfo && (
+        <div className="update-modal-overlay" onClick={() => setUpdateModalOpen(false)}>
+          <div className="update-modal-card" onClick={(e) => e.stopPropagation()}>
+            <div className="update-modal-header">
+              <div className="update-modal-title">
+                <span>🚀 发现新版本可用</span>
+                <span className="update-new-version-badge">{updateInfo.tag_name}</span>
+              </div>
+              <button className="update-modal-close-btn" onClick={() => setUpdateModalOpen(false)}>
+                ✕
+              </button>
+            </div>
+            <div className="update-modal-body">
+              <div className="update-release-title">{updateInfo.name || `Clip ${updateInfo.tag_name}`}</div>
+              <div className="update-release-date">
+                发布日期：{updateInfo.published_at ? updateInfo.published_at.slice(0, 10) : "最新"}
+              </div>
+              <div className="update-notes-container">
+                <div className="update-notes-label">变更日志 (Release Notes)：</div>
+                <pre className="update-notes-content">{updateInfo.body || "暂无具体更新说明。"}</pre>
+              </div>
+            </div>
+            <div className="update-modal-footer">
+              <button className="btn-update-dismiss" onClick={() => setUpdateModalOpen(false)}>
+                暂不更新
+              </button>
+              <button
+                className="btn-update-download"
+                onClick={() => {
+                  if (updateInfo.html_url) {
+                    openUrl(updateInfo.html_url);
+                  }
+                  setUpdateModalOpen(false);
+                }}
+              >
+                🌐 前往 GitHub 下载安装
+              </button>
             </div>
           </div>
         </div>

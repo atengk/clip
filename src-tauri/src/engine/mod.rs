@@ -68,6 +68,23 @@ pub struct ImageDetail {
     pub file_size: u64,
 }
 
+/// 存储状态与磁盘占用摘要信息 (StorageInfo)
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StorageInfo {
+    /// 数据库文件绝对路径
+    pub db_path: String,
+    /// 数据库文件体积 (字节)
+    pub db_size_bytes: u64,
+    /// 图片 Blob 存储目录绝对路径
+    pub blob_dir: String,
+    /// 图片 Blob 目录总占用体积 (字节)
+    pub blob_size_bytes: u64,
+    /// 历史剪贴板总条目数
+    pub total_entries: usize,
+    /// 常用短语总数
+    pub total_snippets: usize,
+}
+
 /// 剪贴板状态机核心引擎
 pub struct ClipboardEngine {
     driver: Arc<dyn PlatformDriver>,
@@ -706,11 +723,63 @@ impl ClipboardEngine {
         AutostartManager::set_enabled(enable)
             .map_err(|e| EngineError::Platform(PalError::InternalError(e)))
     }
+
+    /// 获取当前存储状态、文件物理路径与磁盘占用情况 (Issue #19)
+    pub fn get_storage_info(&self) -> Result<StorageInfo, EngineError> {
+        let db_path_buf = self.storage.db_path();
+        let db_path_str = match db_path_buf {
+            Some(p) => p.to_string_lossy().to_string(),
+            None => ":memory:".to_string(),
+        };
+
+        let db_size_bytes = match db_path_buf {
+            Some(p) => std::fs::metadata(p).map(|m| m.len()).unwrap_or(0),
+            None => 0,
+        };
+
+        let blob_dir_str = self.blob_dir.to_string_lossy().to_string();
+        let mut blob_size_bytes = 0;
+        if let Ok(entries) = std::fs::read_dir(&self.blob_dir) {
+            for entry in entries.flatten() {
+                if let Ok(meta) = entry.metadata() {
+                    if meta.is_file() {
+                        blob_size_bytes += meta.len();
+                    }
+                }
+            }
+        }
+
+        let (total_entries, total_snippets) = self
+            .storage
+            .get_total_counts()
+            .map_err(EngineError::Storage)?;
+
+        Ok(StorageInfo {
+            db_path: db_path_str,
+            db_size_bytes,
+            blob_dir: blob_dir_str,
+            blob_size_bytes,
+            total_entries,
+            total_snippets,
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_engine_get_storage_info() {
+        let (driver, engine) = setup_engine();
+        driver.simulate_clipboard_change(Some("Storage test entry".into()));
+        let _ = engine.handle_clipboard_change().unwrap();
+
+        let info = engine.get_storage_info().unwrap();
+        assert_eq!(info.total_entries, 1);
+        assert!(info.total_snippets >= 3);
+        assert!(!info.blob_dir.is_empty());
+    }
     use crate::pal::mock::MockPlatformDriver;
     use crate::storage::sqlite::SqliteStorage;
 

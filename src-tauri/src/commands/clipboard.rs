@@ -572,4 +572,150 @@ pub fn set_global_shortcut(
     Ok(clean.to_string())
 }
 
+/// 获取当前存储详细状态与磁盘占用情况 (Issue #19)
+///
+/// @param state 全局应用共享状态
+/// @return 存储信息结构体
+#[tauri::command]
+pub fn get_storage_info(
+    state: State<'_, AppState>,
+) -> Result<crate::engine::StorageInfo, String> {
+    state
+        .engine
+        .get_storage_info()
+        .map_err(|e| format!("获取存储状态失败: {e}"))
+}
+
+/// 在操作系统文件资源管理器中打开数据存储目录 (Issue #19)
+///
+/// @param app Tauri 应用程序句柄
+#[tauri::command]
+pub fn open_storage_dir(app: AppHandle) -> Result<(), String> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default().join(".clip"));
+    let _ = std::fs::create_dir_all(&app_data_dir);
+
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("explorer")
+            .arg(&app_data_dir)
+            .spawn()
+            .map_err(|e| format!("打开存储目录失败: {e}"))?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open")
+            .arg(&app_data_dir)
+            .spawn()
+            .map_err(|e| format!("打开存储目录失败: {e}"))?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("xdg-open")
+            .arg(&app_data_dir)
+            .spawn()
+            .map_err(|e| format!("打开存储目录失败: {e}"))?;
+    }
+    Ok(())
+}
+
+/// 弹出系统原生“文件另存为”对话框，返回选定的文件绝对路径 (Issue #19)
+///
+/// @param default_name 建议的默认文件名
+/// @return 用户确认的绝对路径或取消操作时返回 None
+#[tauri::command]
+pub fn select_backup_save_path(default_name: Option<String>) -> Result<Option<String>, String> {
+    #[cfg(windows)]
+    {
+        let filename = default_name.unwrap_or_else(|| {
+            format!("Clip-Backup-{}.clipbak", get_current_date_stamp())
+        });
+        let script = format!(
+            r#"$ErrorActionPreference = 'SilentlyContinue'; [System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms') | Out-Null; $dialog = New-Object System.Windows.Forms.SaveFileDialog; $dialog.Filter = 'Clip 备份归档 (*.clipbak)|*.clipbak|所有文件 (*.*)|*.*'; $dialog.FileName = '{}'; if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output $dialog.FileName }}"#,
+            filename
+        );
+        run_powershell_dialog(&script, "调起文件另存为对话框失败")
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(None)
+    }
+}
+
+/// 弹出系统原生“打开文件”选择器，返回用户选中的备份文件绝对路径 (Issue #19)
+///
+/// @return 用户选中的绝对路径或取消操作时返回 None
+#[tauri::command]
+pub fn select_backup_open_path() -> Result<Option<String>, String> {
+    #[cfg(windows)]
+    {
+        let script = r#"$ErrorActionPreference = 'SilentlyContinue'; [System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms') | Out-Null; $dialog = New-Object System.Windows.Forms.OpenFileDialog; $dialog.Filter = 'Clip 备份归档 (*.clipbak)|*.clipbak|所有文件 (*.*)|*.*'; if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $dialog.FileName }"#;
+        run_powershell_dialog(script, "调起文件打开对话框失败")
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(None)
+    }
+}
+
+/// 执行轻量 Win32 Forms 对话框 PowerShell 脚本辅助函数
+#[cfg(windows)]
+fn run_powershell_dialog(script: &str, error_prefix: &str) -> Result<Option<String>, String> {
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .output()
+        .map_err(|e| format!("{error_prefix}: {e}"))?;
+    let res = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if res.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(res))
+    }
+}
+
+/// 基于辛纳公历算法将 UNIX 时间戳转换为 YYYYMMDD 格式紧凑日期戳
+fn get_current_date_stamp() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    days_to_ymd_string(secs / 86400)
+}
+
+/// 天数转换为 YYYYMMDD 格式化字符串纯函数 (方便单测)
+fn days_to_ymd_string(days: u64) -> String {
+    // 算法基于 Howard Hinnant 的民用历算法，自 1970-01-01 起算
+    const ERA_DAYS: u64 = 146097; // 400 年为一个周期周期，共 146097 天
+    const OFFSET_TO_ERA: u64 = 719468; // 0000-03-01 至 1970-01-01 的累计天数
+    let z = days + OFFSET_TO_ERA;
+    let era = z / ERA_DAYS;
+    let doe = z - era * ERA_DAYS;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if m <= 2 { y + 1 } else { y };
+    format!("{:04}{:02}{:02}", year, m, d)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_days_to_ymd_string_epoch_and_future() {
+        // 1970-01-01: 第 0 天
+        assert_eq!(days_to_ymd_string(0), "19700101");
+        // 2000-01-01: 闰年第 10957 天
+        assert_eq!(days_to_ymd_string(10957), "20000101");
+        // 2026-10-08: 第 20734 天
+        assert_eq!(days_to_ymd_string(20734), "20261008");
+    }
+}
+
 
