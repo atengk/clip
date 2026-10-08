@@ -1,6 +1,6 @@
 [package]
 name = "clip"
-version = "1.2.4"
+version = "1.2.5"
 description = "📋 极轻量、跨平台桌面剪贴板历史管理器，基于 Tauri v2 + React + Rust 构建。"
 authors = ["Ateng"]
 edition = "2021"
@@ -41,6 +41,7 @@ features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_System_Threading",
     "Win32_System_SystemInformation",
+    "Win32_Security",
     "Media_Ocr",
     "Graphics_Imaging",
     "Storage_Streams",

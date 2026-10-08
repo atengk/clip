@@ -14,12 +14,13 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { maskSensitiveContent } from "./utils/privacy";
 import { compareSemVer, formatBytes } from "./utils/version";
 import { parseColor } from "./utils/color";
+import { ReleaseNotesView } from "./components/ReleaseNotesView";
 import "./App.css";
 
 /**
  * 当前客户端编译版本号 (SemVer)
  */
-export const CURRENT_VERSION = "v1.2.4";
+export const CURRENT_VERSION = "v1.2.5";
 
 /**
  * 存储状态与磁盘占用摘要信息契约 (遵循 Issue #19)
@@ -1034,36 +1035,76 @@ const MainPanel: React.FC = () => {
     downloadAbortRef.current = abortController;
 
     try {
-      // 2. 尝试读取 checksums.txt 清单以执行 Checksum Gate 强校验
+      // 2. 尝试读取 checksums.txt 清单以执行 Checksum Gate 强校验 (多通道回退)
       if (checksumsAsset) {
         setDownloadProgress((prev) => ({ ...prev, statusText: "正在读取校验清单..." }));
-        try {
-          const checkResp = await fetch(checksumsAsset.browser_download_url, {
-            signal: abortController.signal,
-          });
-          if (checkResp.ok) {
-            const checkText = await checkResp.text();
-            for (const line of checkText.split("\n")) {
-              const parts = line.trim().split(/\s+/);
-              if (parts.length >= 2 && parts[1] === setupAsset.name) {
-                targetSha256 = parts[0];
-                break;
+        const checkCandidates = [
+          checksumsAsset.browser_download_url,
+          `https://ghfast.top/${checksumsAsset.browser_download_url}`,
+          `https://ghproxy.net/${checksumsAsset.browser_download_url}`,
+        ];
+        for (const checkUrl of checkCandidates) {
+          try {
+            const checkResp = await fetch(checkUrl, {
+              signal: abortController.signal,
+            });
+            if (checkResp.ok) {
+              const checkText = await checkResp.text();
+              for (const line of checkText.split("\n")) {
+                const parts = line.trim().split(/\s+/);
+                if (parts.length >= 2 && parts[1] === setupAsset.name) {
+                  targetSha256 = parts[0];
+                  break;
+                }
               }
+              if (targetSha256) break;
             }
+          } catch {
+            // 单节点异常自动回退
           }
-        } catch {
-          // 清单读取异常不阻断，降级为直连下载
         }
       }
 
-      // 3. 流式下载目标安装包
-      setDownloadProgress((prev) => ({ ...prev, statusText: "正在下载更新安装包..." }));
-      const response = await fetch(setupAsset.browser_download_url, {
-        signal: abortController.signal,
-      });
+      // 3. 多通道流式下载目标安装包 (直连优先，受阻自动降级国内加速镜像)
+      const downloadEndpoints = [
+        { name: "GitHub 节点", url: setupAsset.browser_download_url },
+        { name: "国内加速通道 A", url: `https://ghfast.top/${setupAsset.browser_download_url}` },
+        { name: "国内加速通道 B", url: `https://ghproxy.net/${setupAsset.browser_download_url}` },
+      ];
 
-      if (!response.ok) {
-        throw new Error(`下载请求失败 (HTTP ${response.status})`);
+      let response: Response | null = null;
+      let activeEndpointName = "";
+
+      for (let i = 0; i < downloadEndpoints.length; i++) {
+        const ep = downloadEndpoints[i];
+        if (abortController.signal.aborted) break;
+
+        setDownloadProgress((prev) => ({
+          ...prev,
+          statusText: i === 0 ? "正在连接下载节点..." : `直连受阻，正在切换备用通道 (${ep.name})...`,
+        }));
+
+        try {
+          const resp = await fetch(ep.url, {
+            signal: abortController.signal,
+          });
+          if (resp.ok && resp.body) {
+            response = resp;
+            activeEndpointName = ep.name;
+            break;
+          }
+        } catch (fetchErr: any) {
+          if (fetchErr.name === "AbortError") {
+            throw fetchErr;
+          }
+          // 当前节点超时或网络异常，继续尝试下一个候选节点
+        }
+      }
+
+      if (!response || !response.body) {
+        throw new Error(
+          "直连与加速通道连接均受限（可能因防火墙阻断或网络环境限制）。建议点击下方【前往 GitHub】或【浏览器下载】直接获取安装包。"
+        );
       }
 
       const contentLength = response.headers.get("content-length");
@@ -1088,7 +1129,7 @@ const MainPanel: React.FC = () => {
             received: receivedBytes,
             total: totalBytes,
             percent: Math.round(pct),
-            statusText: `正在下载... (${Math.round(pct)}%)`,
+            statusText: `正在下载... (${Math.round(pct)}%) [${activeEndpointName}]`,
           });
         }
       }
@@ -1539,8 +1580,7 @@ const MainPanel: React.FC = () => {
       setSettingsModalOpen(false);
 
       setTimeout(() => {
-        inputRef.current?.focus();
-        inputRef.current?.select();
+        inputRef.current?.blur();
       }, 20);
     });
 
@@ -1611,6 +1651,10 @@ const MainPanel: React.FC = () => {
         }
         if (selectedIds.length > 0) {
           setSelectedIds([]);
+          return;
+        }
+        if (document.activeElement === inputRef.current) {
+          inputRef.current?.blur();
           return;
         }
         handleClose();
@@ -1761,19 +1805,45 @@ const MainPanel: React.FC = () => {
         return;
       }
 
-      // Alt + 1~9: 规范化 Fast-Paste 极速回填 (零按键意图歧义，搜索框内数字输入完全保真)
-      // 非输入框聚焦态下，单按 1~9 亦支持快捷回填
-      const isNumberKey = e.key >= "1" && e.key <= "9";
-      const isAltFastPaste = e.altKey && !e.ctrlKey && !e.metaKey && isNumberKey;
-      const isNonInputFastPaste = !isInputFocused && !e.altKey && !e.ctrlKey && !e.metaKey && isNumberKey;
+      // 提取 1~9 物理数字键 (支持主键盘 Digit1~9 与小键盘 Numpad1~9，并兼容 key 兜底)
+      let digitIndex: number | null = null;
+      if (e.code && e.code.startsWith("Digit")) {
+        const d = parseInt(e.code.replace("Digit", ""), 10);
+        if (d >= 1 && d <= 9) digitIndex = d;
+      } else if (e.code && e.code.startsWith("Numpad")) {
+        const d = parseInt(e.code.replace("Numpad", ""), 10);
+        if (d >= 1 && d <= 9) digitIndex = d;
+      } else if (e.key >= "1" && e.key <= "9") {
+        digitIndex = parseInt(e.key, 10);
+      }
 
-      if (isAltFastPaste || isNonInputFastPaste) {
-        const num = parseInt(e.key, 10);
-        const targetItem = displayItems[num - 1];
+      // Ctrl + 1~9: 全局穿透极速回填 (无论是否聚焦输入框，主键盘/小键盘均可直接穿透直贴)
+      if (digitIndex !== null && e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey) {
+        const targetItem = displayItems[digitIndex - 1];
         if (targetItem) {
           e.preventDefault();
           handleDispatchPaste(targetItem);
           return;
+        }
+      }
+
+      // 列表导航态 (非搜索框聚焦态) 专属键盘交互
+      if (!isInputFocused) {
+        // 单按 '/' 键: 激活搜索框
+        if (e.key === "/" && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey) {
+          e.preventDefault();
+          inputRef.current?.focus();
+          return;
+        }
+
+        // 单按数字 1~9: 列表导航态下一键盲贴前序条目 (无需任何修饰键，极致秒贴)
+        if (digitIndex !== null && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey) {
+          const targetItem = displayItems[digitIndex - 1];
+          if (targetItem) {
+            e.preventDefault();
+            handleDispatchPaste(targetItem);
+            return;
+          }
         }
       }
 
@@ -1886,10 +1956,9 @@ const MainPanel: React.FC = () => {
               onChange={handleQueryChange}
               placeholder={
                 activeTab === "snippets"
-                  ? "搜索常用短语 (支持标题、/快捷缩写或内容)..."
-                  : "搜索剪贴板历史 (支持拼音简拼) 或输入 / 唤出短语..."
+                  ? "搜索常用短语 (点击或按 / 输入)..."
+                  : "搜索剪贴板历史 (点击或按 / 输入，直接按 1~9 秒贴)..."
               }
-              autoFocus
             />
             {query && (
               <button
@@ -2116,7 +2185,7 @@ const MainPanel: React.FC = () => {
                   <div className="item-leading">
                     {/* 1. 数字键帽 (20×20) */}
                     {fastPasteIndex ? (
-                      <span className="item-keycap" title={`快捷粘贴: 按 Alt+${fastPasteIndex}`}>
+                      <span className="item-keycap" title={`快捷直贴: 直接按 ${fastPasteIndex} 或 Ctrl+${fastPasteIndex}`}>
                         {fastPasteIndex}
                       </span>
                     ) : (
@@ -2499,7 +2568,8 @@ const MainPanel: React.FC = () => {
           </button>
 
           <div className="footer-nav-hints">
-            <span>Alt+1~9 直贴</span>
+            <span>1~9 / Ctrl+1~9 直贴</span>
+            <span>/ 搜索</span>
             <span>↑↓ 漫游</span>
             <span>Space 抽屉</span>
             <span>↵ 回填</span>
@@ -2795,7 +2865,7 @@ const MainPanel: React.FC = () => {
                       </div>
                       <div className="cheatsheet-item">
                         <span className="cheatsheet-desc">前 9 项极速直贴</span>
-                        <div className="cheatsheet-kbd-group"><kbd>Alt</kbd> + <kbd>1~9</kbd></div>
+                        <div className="cheatsheet-kbd-group"><kbd>1~9</kbd> 或 <kbd>Ctrl</kbd> + <kbd>1~9</kbd></div>
                       </div>
                       <div className="cheatsheet-item">
                         <span className="cheatsheet-desc">连贴模式启动/暂停</span>
@@ -2807,6 +2877,10 @@ const MainPanel: React.FC = () => {
                   <div className="cheatsheet-category">
                     <span className="cheatsheet-cat-title">🗂️ 列表导航与窗口</span>
                     <div className="cheatsheet-grid">
+                      <div className="cheatsheet-item">
+                        <span className="cheatsheet-desc">激活搜索打字</span>
+                        <div className="cheatsheet-kbd-group"><kbd>/</kbd> 或 鼠标点击</div>
+                      </div>
                       <div className="cheatsheet-item">
                         <span className="cheatsheet-desc">上下漫游浏览历史</span>
                         <div className="cheatsheet-kbd-group"><kbd>↑</kbd> / <kbd>↓</kbd></div>
@@ -3072,8 +3146,8 @@ const MainPanel: React.FC = () => {
                 发布日期：{updateInfo.published_at ? updateInfo.published_at.slice(0, 10) : "最新"}
               </div>
               <div className="update-notes-container">
-                <div className="update-notes-label">变更日志 (Release Notes)：</div>
-                <pre className="update-notes-content">{updateInfo.body || "暂无具体更新说明。"}</pre>
+                <div className="update-notes-label">更新日志 (Release Notes)：</div>
+                <ReleaseNotesView body={updateInfo.body} />
               </div>
 
               {/* 流式下载进度展示 (Issue #20) */}
@@ -3103,10 +3177,27 @@ const MainPanel: React.FC = () => {
                 </div>
               )}
 
-              {/* 下载错误提示 */}
+              {/* 下载错误提示与直链下载救济 */}
               {downloadError && (
                 <div className="update-error-banner">
-                  ⚠️ {downloadError}
+                  <div className="update-error-message">⚠️ {downloadError}</div>
+                  {updateInfo.assets && updateInfo.assets.length > 0 && (
+                    <button
+                      className="btn-update-browser-direct"
+                      onClick={() => {
+                        const setupAsset =
+                          updateInfo.assets?.find((a) => a.name.includes("Windows") && a.name.endsWith(".exe")) ||
+                          updateInfo.assets?.find((a) => a.name.endsWith("-Setup.exe") || a.name.endsWith(".exe"));
+                        if (setupAsset) {
+                          openUrl(setupAsset.browser_download_url);
+                        } else if (updateInfo.html_url) {
+                          openUrl(updateInfo.html_url);
+                        }
+                      }}
+                    >
+                      🌐 在浏览器中直接下载安装包
+                    </button>
+                  )}
                 </div>
               )}
             </div>

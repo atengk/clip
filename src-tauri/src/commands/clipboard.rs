@@ -710,8 +710,12 @@ pub fn select_backup_open_path() -> Result<Option<String>, String> {
 /// 执行轻量 Win32 Forms 对话框 PowerShell 脚本辅助函数
 #[cfg(windows)]
 fn run_powershell_dialog(script: &str, error_prefix: &str) -> Result<Option<String>, String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
     let output = std::process::Command::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map_err(|e| format!("{error_prefix}: {e}"))?;
     let res = String::from_utf8_lossy(&output.stdout).trim().to_string();

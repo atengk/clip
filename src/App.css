@@ -2265,6 +2265,162 @@ kbd {
   overflow-y: auto;
 }
 
+/* 结构化 ReleaseNotesView 富文本卡片流 (Issue #21) */
+.release-notes-view {
+  max-height: 220px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-right: 4px;
+}
+
+.release-notes-empty {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+  padding: 12px 0;
+}
+
+.release-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.release-section-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  align-self: flex-start;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+
+.release-section-badge.badge-feature {
+  background: rgba(99, 102, 241, 0.12);
+  color: #4f46e5;
+  border: 1px solid rgba(99, 102, 241, 0.25);
+}
+
+.release-section-badge.badge-fix {
+  background: rgba(16, 185, 129, 0.12);
+  color: #059669;
+  border: 1px solid rgba(16, 185, 129, 0.25);
+}
+
+.release-section-badge.badge-perf {
+  background: rgba(245, 158, 11, 0.12);
+  color: #d97706;
+  border: 1px solid rgba(245, 158, 11, 0.25);
+}
+
+.release-section-badge.badge-refactor {
+  background: rgba(14, 165, 233, 0.12);
+  color: #0284c7;
+  border: 1px solid rgba(14, 165, 233, 0.25);
+}
+
+.release-section-badge.badge-doc,
+.release-section-badge.badge-default {
+  background: #f1f5f9;
+  color: #475569;
+  border: 1px solid #cbd5e1;
+}
+
+.release-items-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding-left: 2px;
+}
+
+.release-item-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-main);
+  background: #ffffff;
+  border: 1px solid #eef2f6;
+  border-radius: 6px;
+  padding: 6px 10px;
+}
+
+.release-item-bullet {
+  color: var(--brand-primary);
+  font-weight: bold;
+  user-select: none;
+}
+
+.release-item-content {
+  flex: 1;
+  word-break: break-word;
+}
+
+.release-item-title {
+  font-weight: 600;
+  color: #1e293b;
+}
+
+.release-item-desc {
+  color: #475569;
+}
+
+.release-note-code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
+  color: #0f172a;
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+.update-error-banner {
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  color: #dc2626;
+  font-size: 12px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  margin-top: 10px;
+  line-height: 1.4;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.update-error-message {
+  word-break: break-word;
+}
+
+.btn-update-browser-direct {
+  align-self: flex-start;
+  background: #ffffff;
+  border: 1px solid #f87171;
+  color: #b91c1c;
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: all 0.15s ease;
+}
+
+.btn-update-browser-direct:hover {
+  background: #fee2e2;
+}
+
 .update-modal-footer {
   height: 52px;
   padding: 0 16px;

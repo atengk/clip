@@ -14,6 +14,9 @@ impl AutostartManager {
     pub fn is_enabled() -> bool {
         #[cfg(windows)]
         {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+
             let output = std::process::Command::new("reg")
                 .args([
                     "query",
@@ -21,6 +24,7 @@ impl AutostartManager {
                     "/v",
                     "Clip",
                 ])
+                .creation_flags(CREATE_NO_WINDOW)
                 .output();
 
             match output {
@@ -41,6 +45,9 @@ impl AutostartManager {
     pub fn set_enabled(enable: bool) -> Result<(), String> {
         #[cfg(windows)]
         {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+
             if enable {
                 let current_exe = std::env::current_exe().map_err(|e| e.to_string())?;
                 let exe_str = current_exe.to_string_lossy().to_string();
@@ -58,6 +65,7 @@ impl AutostartManager {
                         &cmd_val,
                         "/f",
                     ])
+                    .creation_flags(CREATE_NO_WINDOW)
                     .status()
                     .map_err(|e| format!("执行注册表写入失败: {e}"))?;
 
@@ -75,6 +83,7 @@ impl AutostartManager {
                         "Clip",
                         "/f",
                     ])
+                    .creation_flags(CREATE_NO_WINDOW)
                     .status();
                 Ok(())
             }
