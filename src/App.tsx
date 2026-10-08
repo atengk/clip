@@ -12,7 +12,6 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { maskSensitiveContent } from "./utils/privacy";
-import { CompactPopover } from "./components/CompactPopover";
 import "./App.css";
 
 /**
@@ -415,13 +414,6 @@ const MainPanel: React.FC = () => {
     queryRef.current = query;
   }, [query]);
 
-  // 紧凑光标吸附卡片形态 (Issue #18)
-  const [isCompact, setIsCompact] = useState<boolean>(true);
-  const selectedIndexRef = useRef(selectedIndex);
-  useEffect(() => {
-    selectedIndexRef.current = selectedIndex;
-  }, [selectedIndex]);
-
   /**
    * 加载数据并生成统一直观展示模型
    */
@@ -557,27 +549,6 @@ const MainPanel: React.FC = () => {
       return true;
     });
   }, [activeTab, filterCategory, rawDisplayItems]);
-
-  const displayItemsRef = useRef(displayItems);
-  useEffect(() => {
-    displayItemsRef.current = displayItems;
-  }, [displayItems]);
-
-  /**
-   * 将紧凑小浮窗平滑展开为 660×520 完整管理大面板
-   */
-  const handleExpandToFull = useCallback(async () => {
-    try {
-      await invoke("expand_to_full_window");
-      setIsCompact(false);
-      setTimeout(() => {
-        inputRef.current?.focus();
-        inputRef.current?.select();
-      }, 30);
-    } catch (err) {
-      console.error("展开为完整面板失败:", err);
-    }
-  }, []);
 
   /**
    * 触发条目极速回填
@@ -1078,13 +1049,7 @@ const MainPanel: React.FC = () => {
       loadData(activeTabRef.current, queryRef.current);
     });
 
-    const unlistenPanelShown = listen<string>("panel-shown", (event) => {
-      const mode = event.payload;
-      if (mode === "full") {
-        setIsCompact(false);
-      } else {
-        setIsCompact(true);
-      }
+    const unlistenPanelShown = listen("panel-shown", () => {
       setQuery("");
       setActiveTab("history");
       setFilterCategory("all");
@@ -1096,39 +1061,10 @@ const MainPanel: React.FC = () => {
       setPreviewModalOpen(false);
       setSnippetModalOpen(false);
       setSettingsModalOpen(false);
-      if (mode === "full") {
-        setTimeout(() => {
-          inputRef.current?.focus();
-          inputRef.current?.select();
-        }, 20);
-      }
-    });
-
-    const unlistenGlobalKeyNav = listen<string>("global-key-nav", (event) => {
-      const key = event.payload;
-      const items = displayItemsRef.current;
-      const curIdx = selectedIndexRef.current;
-
-      if (key === "up") {
-        setSelectedIndex((prev) => Math.max(0, prev - 1));
-      } else if (key === "down") {
-        setSelectedIndex((prev) => Math.min(Math.max(0, items.length - 1), prev + 1));
-      } else if (key === "enter") {
-        const target = items[curIdx];
-        if (target) {
-          handleDispatchPaste(target);
-        }
-      } else if (key === "escape") {
-        handleClose();
-      } else if (key === "tab") {
-        handleExpandToFull();
-      } else if (/^[1-9]$/.test(key)) {
-        const digitIdx = parseInt(key, 10) - 1;
-        const target = items[digitIdx];
-        if (target) {
-          handleDispatchPaste(target);
-        }
-      }
+      setTimeout(() => {
+        inputRef.current?.focus();
+        inputRef.current?.select();
+      }, 20);
     });
 
     invoke<string>("get_global_shortcut")
@@ -1160,11 +1096,10 @@ const MainPanel: React.FC = () => {
       unlistenIncognito.then((f) => f());
       unlistenRestored.then((f) => f());
       unlistenPanelShown.then((f) => f());
-      unlistenGlobalKeyNav.then((f) => f());
       unlistenShortcutChanged.then((f) => f());
       unlistenFocus.then((f) => f());
     };
-  }, [loadData, handleClose, handleDispatchPaste, handleExpandToFull]);
+  }, [loadData, handleClose]);
 
   // 全局键盘导航流闭环 (Issue #15)
   useEffect(() => {
@@ -1418,20 +1353,6 @@ const MainPanel: React.FC = () => {
 
   // 当前选中的项
   const selectedItem = displayItems[selectedIndex];
-
-  // 处于紧凑光标吸附卡片形态时的精简渲染 (Issue #18)
-  if (isCompact) {
-    return (
-      <CompactPopover
-        items={displayItems}
-        selectedIndex={selectedIndex}
-        temporaryRevealId={temporaryRevealId}
-        onSelectIndex={setSelectedIndex}
-        onPaste={handleDispatchPaste}
-        onExpandToFull={handleExpandToFull}
-      />
-    );
-  }
 
   return (
     <div className="panel-container">

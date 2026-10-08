@@ -68,11 +68,8 @@ pub fn toggle_pin(
 
 
 
-/// 安全隐藏主面板并清理 Popover 低级按键与鼠标拦截钩子
+/// 安全隐藏主面板
 pub fn safe_hide_main_window(app: &AppHandle) {
-    #[cfg(windows)]
-    crate::pal::windows::WindowsPlatformDriver::uninstall_popover_hooks();
-
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.hide();
     }
@@ -162,14 +159,7 @@ pub fn hide_window(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// 将光标吸附小浮窗平滑展开为 660×520 完整管理大面板
-///
-/// @param app Tauri 应用程序句柄
-#[tauri::command]
-pub fn expand_to_full_window(app: AppHandle) -> Result<(), String> {
-    crate::show_full_window(&app);
-    Ok(())
-}
+
 
 /// 获取指定图片哈希的 Base64 详细数据（含图片尺寸与文件大小）
 ///

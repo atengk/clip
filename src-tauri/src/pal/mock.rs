@@ -92,7 +92,7 @@ impl MockPlatformDriver {
     }
 
     /// 模拟测试根据锚点计算浮窗吸附坐标 (基于纯算法 Flip-fit)
-    pub fn calculate_popover_position(
+    pub fn calculate_anchor_position(
         &self,
         anchor: crate::pal::anchor::AnchorPoint,
         width: i32,
@@ -235,14 +235,14 @@ mod tests {
     }
 
     #[test]
-    fn test_mock_platform_driver_popover_anchor() {
+    fn test_mock_platform_driver_anchor() {
         let driver = MockPlatformDriver::new();
         let work_area = crate::pal::anchor::ScreenRect::new(0, 0, 1920, 1080);
         let anchor = crate::pal::anchor::AnchorPoint::new(100, 200);
-        let (x, y) = driver.calculate_popover_position(
+        let (x, y) = driver.calculate_anchor_position(
             anchor,
-            crate::pal::anchor::COMPACT_POPOVER_WIDTH,
-            crate::pal::anchor::COMPACT_POPOVER_HEIGHT,
+            crate::pal::anchor::FULL_WINDOW_WIDTH,
+            crate::pal::anchor::FULL_WINDOW_HEIGHT,
             work_area,
         );
         assert_eq!(x, 100);

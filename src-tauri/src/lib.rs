@@ -15,7 +15,6 @@ use crate::commands::clipboard::{
     paste_multiple_entries, paste_plain_entry, paste_queue_pop, paste_snippet, save_snippet,
     search_history, search_snippets, set_autostart, toggle_incognito, toggle_paste_queue,
     toggle_pin, transform_and_paste_entry, get_global_shortcut, set_global_shortcut,
-    expand_to_full_window,
 };
 use crate::commands::AppState;
 use crate::engine::ClipboardEngine;
@@ -396,23 +395,15 @@ pub fn run() {
             set_autostart,
             clear_all_history,
             get_global_shortcut,
-            set_global_shortcut,
-            expand_to_full_window
+            set_global_shortcut
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
 
-/// 展现完整 660×520 剪贴板管理大面板 (常规前台焦点模式)
+/// 展现 660×520 剪贴板管理主面板 (居中常规前台焦点模式)
 pub fn show_full_window(app_handle: &tauri::AppHandle) {
     if let Some(window) = app_handle.get_webview_window("main") {
-        #[cfg(windows)]
-        {
-            crate::pal::windows::WindowsPlatformDriver::uninstall_popover_hooks();
-            if let Ok(hwnd) = window.hwnd() {
-                crate::pal::windows::WindowsPlatformDriver::remove_no_activate(hwnd.0 as isize);
-            }
-        }
         let _ = window.set_size(tauri::PhysicalSize::new(
             crate::pal::anchor::FULL_WINDOW_WIDTH as u32,
             crate::pal::anchor::FULL_WINDOW_HEIGHT as u32,
@@ -420,14 +411,13 @@ pub fn show_full_window(app_handle: &tauri::AppHandle) {
         let _ = window.center();
         let _ = window.show();
         let _ = window.set_focus();
-        let _ = app_handle.emit("panel-shown", "full");
+        let _ = app_handle.emit("panel-shown", ());
     }
 }
 
 /// 切换主程序悬浮面板显示/隐藏状态
 ///
-/// 默认采用紧凑光标吸附免失焦形态 (Non-Activating Compact Popover)，
-/// 贴靠正在输入的文本光标或鼠标指针，并阻断对宿主就地编辑态的破坏。
+/// 统一采用光标/鼠标指针自适应吸附与四向翻转防溢出贴靠 (WindowAnchor & Flip-fit)
 pub fn toggle_main_window(app_handle: &tauri::AppHandle) {
     if let Some(window) = app_handle.get_webview_window("main") {
         if let Ok(is_visible) = window.is_visible() {
@@ -437,56 +427,32 @@ pub fn toggle_main_window(app_handle: &tauri::AppHandle) {
                 #[cfg(windows)]
                 crate::pal::windows::WindowsPlatformDriver::capture_foreground_window();
 
-                const COMPACT_WIDTH: i32 = crate::pal::anchor::COMPACT_POPOVER_WIDTH;
-                const COMPACT_HEIGHT: i32 = crate::pal::anchor::COMPACT_POPOVER_HEIGHT;
+                const WIN_WIDTH: i32 = crate::pal::anchor::FULL_WINDOW_WIDTH;
+                const WIN_HEIGHT: i32 = crate::pal::anchor::FULL_WINDOW_HEIGHT;
 
                 #[cfg(windows)]
                 let (x, y) = crate::pal::windows::WindowsPlatformDriver::get_window_anchor_position(
-                    COMPACT_WIDTH,
-                    COMPACT_HEIGHT,
+                    WIN_WIDTH,
+                    WIN_HEIGHT,
                 );
                 #[cfg(not(windows))]
                 let (x, y) = {
                     if let Ok(Some(monitor)) = window.current_monitor() {
                         let monitor_size = monitor.size();
                         let monitor_pos = monitor.position();
-                        let px = monitor_pos.x + ((monitor_size.width as i32 - COMPACT_WIDTH) / 2);
-                        let py = monitor_pos.y + ((monitor_size.height as i32 - COMPACT_HEIGHT) / 4);
+                        let px = monitor_pos.x + ((monitor_size.width as i32 - WIN_WIDTH) / 2);
+                        let py = monitor_pos.y + ((monitor_size.height as i32 - WIN_HEIGHT) / 2);
                         (px, py)
                     } else {
                         (100, 100)
                     }
                 };
 
-                #[cfg(windows)]
-                {
-                    if let Ok(hwnd) = window.hwnd() {
-                        crate::pal::windows::WindowsPlatformDriver::show_window_no_activate(
-                            hwnd.0 as isize,
-                            x,
-                            y,
-                            COMPACT_WIDTH,
-                            COMPACT_HEIGHT,
-                        );
-                        crate::pal::windows::WindowsPlatformDriver::install_popover_hooks(
-                            app_handle.clone(),
-                            hwnd.0 as isize,
-                        );
-                    } else {
-                        let _ = window.set_size(tauri::PhysicalSize::new(COMPACT_WIDTH as u32, COMPACT_HEIGHT as u32));
-                        let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
-                        let _ = window.show();
-                    }
-                }
-                #[cfg(not(windows))]
-                {
-                    let _ = window.set_size(tauri::PhysicalSize::new(COMPACT_WIDTH as u32, COMPACT_HEIGHT as u32));
-                    let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
-
-                let _ = app_handle.emit("panel-shown", "compact");
+                let _ = window.set_size(tauri::PhysicalSize::new(WIN_WIDTH as u32, WIN_HEIGHT as u32));
+                let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+                let _ = window.show();
+                let _ = window.set_focus();
+                let _ = app_handle.emit("panel-shown", ());
             }
         }
     }
