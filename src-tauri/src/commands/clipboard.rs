@@ -68,8 +68,11 @@ pub fn toggle_pin(
 
 
 
-/// 安全隐藏主面板
+/// 安全隐藏主面板并卸载底层输入守护钩子
 pub fn safe_hide_main_window(app: &AppHandle) {
+    #[cfg(windows)]
+    crate::pal::windows::WindowsPlatformDriver::uninstall_popover_hooks();
+
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.hide();
     }

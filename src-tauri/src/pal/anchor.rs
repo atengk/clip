@@ -101,9 +101,91 @@ pub fn calculate_flip_fit_position(
     (x, y)
 }
 
+/// 将系统虚拟键码（VK_CODE）及修饰键状态映射为免激活面板导航控制行为
+///
+/// 严格防御系统级快捷键（例如 Alt+Tab 窗口切换、Ctrl+C/V 等），在此类场景下返回 None，绝不拦截阻断。
+///
+/// @param vk_code 虚拟键码
+/// @param is_alt_down Alt 键是否处于按下态
+/// @param is_ctrl_down Ctrl 键是否处于按下态
+/// @return 对应的导航动作标识字符串，若无需接管则返回 None
+pub fn map_vk_to_popover_action(
+    vk_code: u16,
+    is_alt_down: bool,
+    is_ctrl_down: bool,
+) -> Option<&'static str> {
+    // 若携带 Alt 或 Ctrl 修饰键，一律不予拦截，保证 Alt+Tab、Ctrl+W 等系统快捷键畅通无阻
+    if is_alt_down || is_ctrl_down {
+        return None;
+    }
+
+    match vk_code {
+        0x26 => Some("up"),      // VK_UP
+        0x28 => Some("down"),    // VK_DOWN
+        0x0D => Some("enter"),   // VK_RETURN
+        0x1B => Some("escape"),  // VK_ESCAPE
+        0x09 => Some("tab"),     // VK_TAB
+        // 0x31..=0x39: 主键盘数字键 1~9
+        0x31..=0x39 => {
+            const DIGITS: [&str; 9] = ["1", "2", "3", "4", "5", "6", "7", "8", "9"];
+            Some(DIGITS[(vk_code - 0x31) as usize])
+        }
+        // 0x61..=0x69: 小键盘数字键 1~9
+        0x61..=0x69 => {
+            const DIGITS: [&str; 9] = ["1", "2", "3", "4", "5", "6", "7", "8", "9"];
+            Some(DIGITS[(vk_code - 0x61) as usize])
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_map_vk_navigation_keys() {
+        // 纯净导航按键
+        assert_eq!(map_vk_to_popover_action(0x26, false, false), Some("up"));
+        assert_eq!(map_vk_to_popover_action(0x28, false, false), Some("down"));
+        assert_eq!(map_vk_to_popover_action(0x0D, false, false), Some("enter"));
+        assert_eq!(map_vk_to_popover_action(0x1B, false, false), Some("escape"));
+        assert_eq!(map_vk_to_popover_action(0x09, false, false), Some("tab"));
+
+        // 包含 Alt 修饰键的 Tab (如 Alt+Tab) 绝不拦截！
+        assert_eq!(map_vk_to_popover_action(0x09, true, false), None);
+        // 包含 Ctrl 修饰键的 Tab 绝不拦截！
+        assert_eq!(map_vk_to_popover_action(0x09, false, true), None);
+    }
+
+    #[test]
+    fn test_map_vk_fast_paste_digits() {
+        // 主键盘数字键 1~9
+        for (i, code) in (0x31..=0x39).enumerate() {
+            let expected = format!("{}", i + 1);
+            assert_eq!(
+                map_vk_to_popover_action(code, false, false),
+                Some(expected.as_str())
+            );
+        }
+
+        // 小键盘数字键 1~9
+        for (i, code) in (0x61..=0x69).enumerate() {
+            let expected = format!("{}", i + 1);
+            assert_eq!(
+                map_vk_to_popover_action(code, false, false),
+                Some(expected.as_str())
+            );
+        }
+
+        // 带有修饰键的数字组合（如 Ctrl+1）不予拦截
+        assert_eq!(map_vk_to_popover_action(0x31, false, true), None);
+        assert_eq!(map_vk_to_popover_action(0x31, true, false), None);
+
+        // 未知或未关心的按键（如字母 A: 0x41, 空格: 0x20）不予拦截
+        assert_eq!(map_vk_to_popover_action(0x41, false, false), None);
+        assert_eq!(map_vk_to_popover_action(0x20, false, false), None);
+    }
 
     #[test]
     fn test_normal_placement_within_bounds() {

@@ -18,7 +18,7 @@ import "./App.css";
 /**
  * 当前客户端编译版本号 (SemVer)
  */
-export const CURRENT_VERSION = "v1.2.1";
+export const CURRENT_VERSION = "v1.2.2";
 
 /**
  * 存储状态与磁盘占用摘要信息契约 (遵循 Issue #19)
@@ -416,12 +416,20 @@ const MainPanel: React.FC = () => {
   const [isRecordingShortcut, setIsRecordingShortcut] = useState<boolean>(false);
   const [shortcutFeedback, setShortcutFeedback] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
+  // 是否处于系统重命名免失焦守护态 (Windows In-Place Renaming Preservation)
+  const [isRenamingMode, setIsRenamingMode] = useState<boolean>(false);
+
   const inputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const revealTimerRef = useRef<number | null>(null);
 
   // 状态镜像 Ref：供单例事件监听器与操作系统失焦回调无延迟同步读取，杜绝依赖项变更导致的重绑风暴
+  const selectedIndexRef = useRef(selectedIndex);
+  useEffect(() => {
+    selectedIndexRef.current = selectedIndex;
+  }, [selectedIndex]);
+
   const isPinnedRef = useRef(isPinned);
   useEffect(() => {
     isPinnedRef.current = isPinned;
@@ -577,6 +585,11 @@ const MainPanel: React.FC = () => {
       return true;
     });
   }, [activeTab, filterCategory, rawDisplayItems]);
+
+  const displayItemsRef = useRef(displayItems);
+  useEffect(() => {
+    displayItemsRef.current = displayItems;
+  }, [displayItems]);
 
   /**
    * 触发条目极速回填
@@ -1168,7 +1181,11 @@ const MainPanel: React.FC = () => {
       loadData(activeTabRef.current, queryRef.current);
     });
 
-    const unlistenPanelShown = listen("panel-shown", () => {
+    const unlistenPanelShown = listen<string>("panel-shown", (event) => {
+      const mode = event.payload;
+      const isRenaming = mode === "renaming";
+      setIsRenamingMode(isRenaming);
+
       setQuery("");
       setActiveTab("history");
       setFilterCategory("all");
@@ -1180,10 +1197,38 @@ const MainPanel: React.FC = () => {
       setPreviewModalOpen(false);
       setSnippetModalOpen(false);
       setSettingsModalOpen(false);
-      setTimeout(() => {
-        inputRef.current?.focus();
-        inputRef.current?.select();
-      }, 20);
+
+      if (!isRenaming) {
+        setTimeout(() => {
+          inputRef.current?.focus();
+          inputRef.current?.select();
+        }, 20);
+      }
+    });
+
+    const unlistenGlobalKeyNav = listen<string>("global-key-nav", (event) => {
+      const key = event.payload;
+      const items = displayItemsRef.current;
+      const curIdx = selectedIndexRef.current;
+
+      if (key === "up") {
+        setSelectedIndex((prev) => Math.max(0, prev - 1));
+      } else if (key === "down") {
+        setSelectedIndex((prev) => Math.min(Math.max(0, items.length - 1), prev + 1));
+      } else if (key === "enter") {
+        const target = items[curIdx];
+        if (target) {
+          handleDispatchPaste(target);
+        }
+      } else if (key === "escape") {
+        handleClose();
+      } else if (/^[1-9]$/.test(key)) {
+        const digitIdx = parseInt(key, 10) - 1;
+        const target = items[digitIdx];
+        if (target) {
+          handleDispatchPaste(target);
+        }
+      }
     });
 
     invoke<string>("get_global_shortcut")
@@ -1215,10 +1260,11 @@ const MainPanel: React.FC = () => {
       unlistenIncognito.then((f) => f());
       unlistenRestored.then((f) => f());
       unlistenPanelShown.then((f) => f());
+      unlistenGlobalKeyNav.then((f) => f());
       unlistenShortcutChanged.then((f) => f());
       unlistenFocus.then((f) => f());
     };
-  }, [loadData, handleClose]);
+  }, [loadData, handleClose, handleDispatchPaste]);
 
   // 全局键盘导航流闭环 (Issue #15)
   useEffect(() => {
@@ -1490,12 +1536,23 @@ const MainPanel: React.FC = () => {
               value={query}
               onChange={handleQueryChange}
               placeholder={
-                activeTab === "snippets"
+                isRenamingMode
+                  ? "🔒 重命名免失焦守护中：可按 1~9 直贴，方向键选择，Enter 确认，Esc 退出"
+                  : activeTab === "snippets"
                   ? "搜索常用短语 (支持标题、/快捷缩写或内容)..."
                   : "搜索剪贴板历史 (支持拼音简拼) 或输入 / 唤出短语..."
               }
-              autoFocus
+              autoFocus={!isRenamingMode}
+              readOnly={isRenamingMode}
             />
+            {isRenamingMode && (
+              <span
+                className="renaming-guardian-badge"
+                title="系统重命名免失焦守护态：当前输入焦点安全保留在原文件重命名框中"
+              >
+                🛡️ 免失焦守护
+              </span>
+            )}
             {query && (
               <button
                 className="search-clear-btn"

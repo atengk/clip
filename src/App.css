@@ -154,6 +154,22 @@ kbd {
   color: var(--text-main);
 }
 
+.renaming-guardian-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  font-weight: 500;
+  color: #059669;
+  background: #ecfdf5;
+  border: 1px solid #a7f3d0;
+  border-radius: 4px;
+  padding: 1px 6px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  user-select: none;
+}
+
 .header-controls {
   display: flex;
   align-items: center;
