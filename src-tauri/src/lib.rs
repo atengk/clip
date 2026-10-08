@@ -9,13 +9,14 @@ pub mod pal;
 pub mod storage;
 
 use crate::commands::clipboard::{
-    clear_all_history, clear_paste_queue, delete_snippet, export_backup, get_history,
+    clear_all_history, clear_paste_queue, delete_entry, delete_entries, delete_snippet, export_backup, get_history,
     get_image_detail, get_incognito_status, get_paste_queue_status, get_snippets, hide_window,
     import_backup, is_autostart_enabled, ocr_image_entry, paste_custom_text, paste_entry,
     paste_multiple_entries, paste_plain_entry, paste_queue_pop, paste_snippet, save_snippet,
     search_history, search_snippets, set_autostart, toggle_incognito, toggle_paste_queue,
     toggle_pin, transform_and_paste_entry, get_global_shortcut, set_global_shortcut,
     get_storage_info, open_storage_dir, select_backup_save_path, select_backup_open_path,
+    get_history_capacity, set_history_capacity,
 };
 use crate::commands::updater::execute_in_place_update;
 use crate::commands::AppState;
@@ -382,6 +383,8 @@ pub fn run() {
             get_snippets,
             save_snippet,
             delete_snippet,
+            delete_entry,
+            delete_entries,
             search_snippets,
             paste_snippet,
             get_paste_queue_status,
@@ -402,7 +405,9 @@ pub fn run() {
             open_storage_dir,
             select_backup_save_path,
             select_backup_open_path,
-            execute_in_place_update
+            execute_in_place_update,
+            get_history_capacity,
+            set_history_capacity
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

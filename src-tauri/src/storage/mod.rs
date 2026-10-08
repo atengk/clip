@@ -204,5 +204,17 @@ pub trait Storage: Send + Sync {
 
     /// 获取数据库中的历史条目总数与常用短语总数
     fn get_total_counts(&self) -> Result<(usize, usize), StorageError>;
+
+    /// 删除单条剪贴板历史记录
+    ///
+    /// @param id 条目主键 ID
+    /// @return 成功删除返回 true，条目不存在返回 false
+    fn delete_entry(&self, id: i64) -> Result<bool, StorageError>;
+
+    /// 批量删除剪贴板历史记录
+    ///
+    /// @param ids 待删除的条目主键 ID 列表
+    /// @return 实际删除的条目数
+    fn delete_entries(&self, ids: &[i64]) -> Result<usize, StorageError>;
 }
 

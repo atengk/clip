@@ -13,12 +13,13 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { maskSensitiveContent } from "./utils/privacy";
 import { compareSemVer, formatBytes } from "./utils/version";
+import { parseColor } from "./utils/color";
 import "./App.css";
 
 /**
  * 当前客户端编译版本号 (SemVer)
  */
-export const CURRENT_VERSION = "v1.2.2";
+export const CURRENT_VERSION = "v1.2.3";
 
 /**
  * 存储状态与磁盘占用摘要信息契约 (遵循 Issue #19)
@@ -132,7 +133,7 @@ export type FilterCategory = "all" | "pinned" | "text" | "image" | "code" | "lin
 /**
  * 自动识别项分类
  */
-export type DetectedKind = "text" | "sensitive" | "code" | "link" | "image" | "snippet";
+export type DetectedKind = "text" | "sensitive" | "code" | "link" | "image" | "snippet" | "color";
 
 /**
  * 分类中文映射表 (消除未转译英文枚举泄漏)
@@ -144,6 +145,7 @@ export const KIND_NAMES: Record<DetectedKind, string> = {
   link: "外链地址",
   image: "位图图像",
   snippet: "常用短语",
+  color: "色彩数值",
 };
 
 /**
@@ -211,7 +213,7 @@ interface ActionItem {
 
 const TRANSFORM_ACTIONS: ActionItem[] = [
   { key: "trim", label: "去除多余空白与换行 (Trim)", description: "剔除首尾空白，折叠连续多行空白", icon: "✂️", hotkey: "1" },
-  { key: "plain_text", label: "强制纯文本 (Plain Text)", description: "剔除所有控制字符，规范换行", icon: "📄", hotkey: "2" },
+  { key: "plain_text", label: "纯文本清洗粘贴 (Shift+Enter)", description: "剔除所有富文本样式与控制字符，保留原生换行缩进", icon: "📄", hotkey: "2" },
   { key: "uppercase", label: "转为全部大写 (UPPERCASE)", description: "英文字符全部转为大写", icon: "🔠", hotkey: "3" },
   { key: "lowercase", label: "转为全部小写 (lowercase)", description: "英文字符全部转为小写", icon: "🔡", hotkey: "4" },
   { key: "camel_case", label: "转为小驼峰 (camelCase)", description: "转换为小驼峰变量规范", icon: "🐫", hotkey: "5" },
@@ -223,6 +225,42 @@ const TRANSFORM_ACTIONS: ActionItem[] = [
 const IMAGE_ACTIONS: ActionItem[] = [
   { key: "ocr", label: "提取文字 (OCR)", description: "利用系统原生离线 OCR 识别中英文字符", icon: "🔍", hotkey: "1" },
 ];
+
+/**
+ * 转义正则特殊字符
+ */
+function escapeRegExp(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * 搜索关键词切片高亮渲染
+ */
+function renderHighlightedText(text: string, query: string): React.ReactNode {
+  const trimmed = query.trim();
+  if (!trimmed || !text) {
+    return text;
+  }
+  try {
+    const escaped = escapeRegExp(trimmed);
+    const regex = new RegExp(`(${escaped})`, "gi");
+    const parts = text.split(regex);
+    if (parts.length <= 1) {
+      return text;
+    }
+    return parts.map((part, index) =>
+      regex.test(part) ? (
+        <mark key={index} className="search-highlight">
+          {part}
+        </mark>
+      ) : (
+        part
+      )
+    );
+  } catch {
+    return text;
+  }
+}
 
 /**
  * 根据内容智能识别条目分类与默认展示标题
@@ -239,6 +277,10 @@ function analyzeContent(content: string, isImage: boolean, isSnippet: boolean, s
     return { kind: "sensitive", title: "敏感信息 (脱敏防窥保护)" };
   }
   const trimmed = content.trim();
+  const colorInfo = parseColor(trimmed);
+  if (colorInfo) {
+    return { kind: "color", title: `色彩: ${colorInfo.hex}` };
+  }
   if (/^https?:\/\/[^\s]+$/i.test(trimmed)) {
     try {
       const url = new URL(trimmed);
@@ -405,6 +447,12 @@ const MainPanel: React.FC = () => {
   const [storageInfo, setStorageInfo] = useState<StorageInfo | null>(null);
   const [copyPathFeedback, setCopyPathFeedback] = useState<boolean>(false);
 
+  // 历史容量上限治理 (Ticket #27)
+  const [historyCapacity, setHistoryCapacity] = useState<number>(500);
+
+  // 色彩数值一键复制反馈 (Ticket #26)
+  const [copiedColorKey, setCopiedColorKey] = useState<string | null>(null);
+
   // 在线更新检查状态 (Issue #19 & #20)
   const [updateChecking, setUpdateChecking] = useState<boolean>(false);
   const [updateInfo, setUpdateInfo] = useState<GitHubReleaseInfo | null>(null);
@@ -419,6 +467,12 @@ const MainPanel: React.FC = () => {
   }>({ received: 0, total: 0, percent: 0, statusText: "" });
   const [downloadError, setDownloadError] = useState<string | null>(null);
   const downloadAbortRef = useRef<AbortController | null>(null);
+
+  // 待提交物理删除与 3 秒撤销网 (Entry Deletion & Safety Net)
+  const [pendingDelete, setPendingDelete] = useState<{ items: DisplayItem[]; timerId: ReturnType<typeof setTimeout> } | null>(null);
+  const [undoToast, setUndoToast] = useState<{ text: string; showUndo: boolean } | null>(null);
+  const pendingDeleteRef = useRef(pendingDelete);
+  pendingDeleteRef.current = pendingDelete;
 
   // 窗口钉住置顶 (WindowPinning) 与失焦自动隐藏保护
   const [isPinned, setIsPinned] = useState<boolean>(() => {
@@ -597,7 +651,7 @@ const MainPanel: React.FC = () => {
       if (filterCategory === "image") return item.kind === "image";
       if (filterCategory === "code") return item.kind === "code";
       if (filterCategory === "link") return item.kind === "link";
-      if (filterCategory === "text") return item.kind === "text" || item.kind === "sensitive";
+      if (filterCategory === "text") return item.kind === "text" || item.kind === "sensitive" || item.kind === "color";
       return true;
     });
   }, [activeTab, filterCategory, rawDisplayItems]);
@@ -817,11 +871,62 @@ const MainPanel: React.FC = () => {
     }
   }, []);
 
+  /**
+   * 刷新历史容量上限 (Ticket #27)
+   */
+  const loadHistoryCapacity = useCallback(async () => {
+    try {
+      const cap = await invoke<number>("get_history_capacity");
+      if (cap) {
+        setHistoryCapacity(cap);
+      }
+    } catch (err) {
+      console.error("获取历史容量上限失败:", err);
+    }
+  }, []);
+
+  /**
+   * 变更历史容量上限并触发 LRU 裁剪与孤立 Blob 清理 (Ticket #27)
+   */
+  const handleSetCapacity = useCallback(
+    async (capacity: number) => {
+      try {
+        await invoke("set_history_capacity", { capacity });
+        setHistoryCapacity(capacity);
+        await loadData(activeTab, query);
+        await loadStorageInfo();
+      } catch (err) {
+        console.error("更新历史容量上限失败:", err);
+      }
+    },
+    [loadData, activeTab, query, loadStorageInfo]
+  );
+
+  /**
+   * 一键复制色彩格式值并展示临时对勾反馈 (Ticket #26)
+   */
+  const handleCopyColorValue = useCallback(async (colorVal: string) => {
+    try {
+      await navigator.clipboard.writeText(colorVal);
+      setCopiedColorKey(colorVal);
+      setTimeout(() => {
+        setCopiedColorKey((prev) => (prev === colorVal ? null : prev));
+      }, 1500);
+    } catch (err) {
+      console.error("复制色彩值失败:", err);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadHistoryCapacity();
+  }, [loadHistoryCapacity]);
+
   useEffect(() => {
     if (settingsModalOpen) {
       loadStorageInfo();
+      loadHistoryCapacity();
     }
-  }, [settingsModalOpen, loadStorageInfo]);
+  }, [settingsModalOpen, loadStorageInfo, loadHistoryCapacity]);
 
   /**
    * 在操作系统文件资源管理器中打开存储目录
@@ -1141,6 +1246,17 @@ const MainPanel: React.FC = () => {
     }
   }, []);
 
+  /**
+   * 纯文本无格式强制回填 (Shift + Enter)
+   */
+  const handlePlainPaste = useCallback(async (id: number) => {
+    try {
+      await invoke("paste_plain_entry", { id });
+    } catch (err: unknown) {
+      console.error("纯文本回填失败:", err);
+    }
+  }, []);
+
   const executeAction = useCallback(
     (item: ClipboardEntry, actionKey: ActionKey) => {
       if (actionKey === "ocr") {
@@ -1281,9 +1397,78 @@ const MainPanel: React.FC = () => {
   }, []);
 
   /**
+   * 提交物理删除条目至 SQLite 及文件系统
+   */
+  const commitPendingDelete = useCallback(async (itemsToDelete: DisplayItem[]) => {
+    try {
+      const historyIds = itemsToDelete.filter((i) => !i.isSnippet).map((i) => i.id);
+      const snippetIds = itemsToDelete.filter((i) => i.isSnippet).map((i) => i.id);
+      if (historyIds.length === 1) {
+        await invoke("delete_entry", { id: historyIds[0] });
+      } else if (historyIds.length > 1) {
+        await invoke("delete_entries", { ids: historyIds });
+      }
+      for (const sid of snippetIds) {
+        await invoke("delete_snippet", { id: sid });
+      }
+    } catch (err) {
+      console.error("提交物理删除条目失败:", err);
+    }
+  }, []);
+
+  /**
+   * 触发条目删除（乐观更新与 3 秒撤销网）
+   */
+  const handleDeleteItems = useCallback((itemsToDelete: DisplayItem[]) => {
+    if (itemsToDelete.length === 0) return;
+    if (pendingDeleteRef.current) {
+      clearTimeout(pendingDeleteRef.current.timerId);
+      commitPendingDelete(pendingDeleteRef.current.items);
+    }
+    const deleteIds = new Set(itemsToDelete.map((i) => `${i.isSnippet ? "s" : "e"}-${i.id}`));
+    setRawDisplayItems((prev) => prev.filter((i) => !deleteIds.has(`${i.isSnippet ? "s" : "e"}-${i.id}`)));
+    setSelectedIds([]);
+    setSelectedIndex(0);
+
+    const timerId = setTimeout(() => {
+      commitPendingDelete(itemsToDelete);
+      setPendingDelete(null);
+      setUndoToast(null);
+    }, 3000);
+
+    setPendingDelete({ items: itemsToDelete, timerId });
+    setUndoToast({
+      text: `已删除 ${itemsToDelete.length} 项`,
+      showUndo: true,
+    });
+  }, [commitPendingDelete]);
+
+  /**
+   * 撤销最近一次删除 (Ctrl+Z)
+   */
+  const handleUndoDelete = useCallback(() => {
+    if (!pendingDeleteRef.current) return;
+    clearTimeout(pendingDeleteRef.current.timerId);
+    const restoredCount = pendingDeleteRef.current.items.length;
+    setPendingDelete(null);
+    loadData(activeTabRef.current, queryRef.current);
+    setUndoToast({
+      text: `✓ 已撤销恢复 ${restoredCount} 项记录`,
+      showUndo: false,
+    });
+    setTimeout(() => setUndoToast(null), 2500);
+  }, [loadData]);
+
+  /**
    * 主动隐藏悬浮面板
    */
   const handleClose = useCallback(async () => {
+    if (pendingDeleteRef.current) {
+      clearTimeout(pendingDeleteRef.current.timerId);
+      commitPendingDelete(pendingDeleteRef.current.items);
+      setPendingDelete(null);
+      setUndoToast(null);
+    }
     setActionPaletteOpen(false);
     setPreviewModalOpen(false);
     setSnippetModalOpen(false);
@@ -1294,7 +1479,7 @@ const MainPanel: React.FC = () => {
     } catch (err) {
       console.error("隐藏窗口失败:", err);
     }
-  }, []);
+  }, [commitPendingDelete]);
 
   const handleQueryChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value;
@@ -1437,6 +1622,34 @@ const MainPanel: React.FC = () => {
         return;
       }
 
+      // 4. Ctrl + Z: 撤销最近一次删除 (Safety Net)
+      if (e.ctrlKey && (e.key === "z" || e.key === "Z")) {
+        if (pendingDeleteRef.current) {
+          e.preventDefault();
+          handleUndoDelete();
+          return;
+        }
+      }
+
+      // 5. Delete 键: 单选/多选删除当前项 (Entry Deletion)
+      if (e.key === "Delete") {
+        const isInputFocused = document.activeElement === inputRef.current;
+        if (!isInputFocused) {
+          if (selectedIds.length > 0) {
+            e.preventDefault();
+            const targets = displayItems.filter((i) => selectedIds.includes(i.id));
+            handleDeleteItems(targets);
+            return;
+          }
+          const current = displayItems[selectedIndex];
+          if (current) {
+            e.preventDefault();
+            handleDeleteItems([current]);
+            return;
+          }
+        }
+      }
+
       if (previewModalOpen) {
         if (e.key === " ") {
           e.preventDefault();
@@ -1553,11 +1766,15 @@ const MainPanel: React.FC = () => {
         return;
       }
 
-      // 1~8 数字键极速单键粘贴：非聚焦输入框时直接单键触发，输入框聚焦时需配合 Alt 组合键触发，保护原生打字
-      const isNumberKey = e.key >= "1" && e.key <= "8";
+      // 1~9 数字键极速粘贴与双轨路由：
+      // 1. 搜索框为空时（query.trim() === ""）：单按数字键 1~9 直接拦截输入并执行 Fast-Paste；
+      // 2. 搜索框有输入内容时：单按数字键正常打字检索，但配合 Ctrl+1~9 或 Alt+1~9 可快速回填对应序号项。
+      const isNumberKey = e.key >= "1" && e.key <= "9";
+      const isZeroQuery = query.trim() === "";
+      const isModifierNumber = (e.ctrlKey || e.altKey) && isNumberKey;
       const shouldFastPasteNumber =
-        (e.altKey && isNumberKey) ||
-        (isNumberKey && !isInputFocused);
+        isModifierNumber ||
+        (isNumberKey && !e.ctrlKey && !e.altKey && !e.metaKey && (isZeroQuery || !isInputFocused));
 
       if (shouldFastPasteNumber) {
         const num = parseInt(e.key, 10);
@@ -1598,6 +1815,16 @@ const MainPanel: React.FC = () => {
         e.preventDefault();
         setSelectedIndex((prev) => (prev > 0 ? prev - 1 : 0));
       } else if (e.key === "Enter") {
+        // Shift + Enter: 纯文本强制无格式粘贴
+        if (e.shiftKey) {
+          e.preventDefault();
+          const current = displayItems[selectedIndex];
+          if (current && !current.isSnippet && current.kind !== "image") {
+            handlePlainPaste(current.id);
+            return;
+          }
+        }
+
         // 多选模式下按回车合并粘贴
         if (selectedIds.length > 1) {
           e.preventDefault();
@@ -1641,6 +1868,10 @@ const MainPanel: React.FC = () => {
     handleOpenCreateSnippet,
     handleTabChange,
     executeAction,
+    handlePlainPaste,
+    handleDeleteItems,
+    handleUndoDelete,
+    query,
   ]);
 
   // 当前选中的项
@@ -1824,7 +2055,7 @@ const MainPanel: React.FC = () => {
           ) : (
             displayItems.map((item, index) => {
               const isSelected = index === selectedIndex;
-              const fastPasteIndex = index < 8 ? index + 1 : null;
+              const fastPasteIndex = index < 9 ? index + 1 : null;
               const isItemMultiSelected = selectedIds.includes(item.id);
 
               // 敏感信息临时显露判断
@@ -1843,6 +2074,14 @@ const MainPanel: React.FC = () => {
                 slotClass = "slot-sensitive";
                 slotIcon = "🛡️";
                 badgeClass = "badge-sensitive";
+              } else if (item.kind === "color") {
+                slotClass = "slot-color";
+                slotIcon = (
+                  <div className="color-swatch-slot">
+                    <div className="color-swatch-fill" style={{ backgroundColor: item.content.trim() }} />
+                  </div>
+                );
+                badgeClass = "badge-color";
               } else if (item.kind === "code") {
                 slotClass = "slot-code";
                 slotIcon = "</>";
@@ -1908,7 +2147,7 @@ const MainPanel: React.FC = () => {
                     {/* 3. 标题与单行等宽摘要 (严格水平对齐) */}
                     <div className="item-content-box">
                       <div className="item-title-row">
-                        <span className="item-title-text">{item.title}</span>
+                        <span className="item-title-text">{renderHighlightedText(item.title, query)}</span>
                         <span className={`item-badge-type ${badgeClass}`}>{badgeLabel}</span>
                         {item.shortcut && <span className="item-badge-type">/{item.shortcut}</span>}
                         {item.is_pinned && <span className="item-pin-star" title="已置顶">★</span>}
@@ -1929,7 +2168,7 @@ const MainPanel: React.FC = () => {
                       <div className="item-snippet-snippet">
                         {item.kind === "image"
                           ? `[位图数据: ${imageDetails[item.content] ? `${imageDetails[item.content].width}×${imageDetails[item.content].height} • ${formatBytes(imageDetails[item.content].file_size)}` : "加载中..."}]`
-                          : previewContent}
+                          : renderHighlightedText(previewContent, query)}
                       </div>
                     </div>
                   </div>
@@ -1952,6 +2191,16 @@ const MainPanel: React.FC = () => {
                         title="查看详细预览 (Space)"
                       >
                         Space 预览
+                      </button>
+                      <button
+                        className="quick-action-btn danger"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleDeleteItems([item]);
+                        }}
+                        title="从历史中删除 (Delete)"
+                      >
+                        🗑️
                       </button>
                       <button
                         className="quick-action-btn primary"
@@ -2122,6 +2371,63 @@ const MainPanel: React.FC = () => {
                   </div>
                 )}
 
+                {/* 真实色彩方块嗅探与多格式互转深度卡片 (Ticket #26) */}
+                {selectedItem.kind === "color" && (() => {
+                  const colorObj = parseColor(selectedItem.content);
+                  if (!colorObj) return <pre className="drawer-text-block">{selectedItem.content}</pre>;
+                  return (
+                    <div className="drawer-color-card">
+                      <div className="drawer-color-preview-banner">
+                        <div className="drawer-color-swatch-frame">
+                          <div
+                            className="drawer-color-swatch-fill"
+                            style={{ backgroundColor: colorObj.raw }}
+                          />
+                        </div>
+                        <div className="drawer-color-banner-info">
+                          <span className="drawer-color-hex">{colorObj.hex}</span>
+                          <span className="drawer-color-rgba">{colorObj.rgb}</span>
+                        </div>
+                      </div>
+                      <div className="drawer-color-formats">
+                        <div className="drawer-color-row">
+                          <span className="color-format-label">HEX</span>
+                          <span className="color-format-value">{colorObj.hex}</span>
+                          <button
+                            type="button"
+                            className="drawer-mini-btn"
+                            onClick={() => handleCopyColorValue(colorObj.hex)}
+                          >
+                            {copiedColorKey === colorObj.hex ? "✓ 已复制" : "📋 复制"}
+                          </button>
+                        </div>
+                        <div className="drawer-color-row">
+                          <span className="color-format-label">RGB</span>
+                          <span className="color-format-value">{colorObj.rgb}</span>
+                          <button
+                            type="button"
+                            className="drawer-mini-btn"
+                            onClick={() => handleCopyColorValue(colorObj.rgb)}
+                          >
+                            {copiedColorKey === colorObj.rgb ? "✓ 已复制" : "📋 复制"}
+                          </button>
+                        </div>
+                        <div className="drawer-color-row">
+                          <span className="color-format-label">HSL</span>
+                          <span className="color-format-value">{colorObj.hsl}</span>
+                          <button
+                            type="button"
+                            className="drawer-mini-btn"
+                            onClick={() => handleCopyColorValue(colorObj.hsl)}
+                          >
+                            {copiedColorKey === colorObj.hsl ? "✓ 已复制" : "📋 复制"}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
+
                 {/* 普通纯文本预览 */}
                 {selectedItem.kind === "text" && (
                   <pre className="drawer-text-block">{selectedItem.content}</pre>
@@ -2130,16 +2436,37 @@ const MainPanel: React.FC = () => {
             </div>
 
             <div className="drawer-footer">
-              <span>
-                行数: {selectedItem.content.split("\n").length} • 大小:{" "}
-                {formatBytes(selectedItem.content.length)}
-              </span>
-              <button
-                className="quick-action-btn primary"
-                onClick={() => handleDispatchPaste(selectedItem)}
-              >
-                ↵ 粘贴 (Enter)
-              </button>
+              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                <span>
+                  行数: {selectedItem.content.split("\n").length} • 大小:{" "}
+                  {formatBytes(selectedItem.content.length)}
+                </span>
+                <button
+                  className="drawer-mini-btn"
+                  onClick={() => handleDeleteItems([selectedItem])}
+                  title="从历史中删除此项 (Delete)"
+                  style={{ padding: "1px 6px", fontSize: "11px", color: "#ef4444" }}
+                >
+                  🗑️ 删除
+                </button>
+              </div>
+              <div style={{ display: "flex", gap: "6px" }}>
+                {!selectedItem.isSnippet && selectedItem.kind !== "image" && (
+                  <button
+                    className="quick-action-btn"
+                    onClick={() => handlePlainPaste(selectedItem.id)}
+                    title="强制纯文本无格式粘贴 (Shift+Enter)"
+                  >
+                    ⇧↵ 纯文本
+                  </button>
+                )}
+                <button
+                  className="quick-action-btn primary"
+                  onClick={() => handleDispatchPaste(selectedItem)}
+                >
+                  ↵ 粘贴 (Enter)
+                </button>
+              </div>
             </div>
           </aside>
         )}
@@ -2182,6 +2509,7 @@ const MainPanel: React.FC = () => {
             <span>↑↓ 导航</span>
             <span>Space 预览</span>
             <span>↵ 回填</span>
+            <span>⇧↵ 纯文本</span>
           </div>
         </div>
       </footer>
@@ -2196,6 +2524,16 @@ const MainPanel: React.FC = () => {
             <span>已选 {selectedIds.length} 项 (按 Enter 换行合并粘贴，Esc 取消)</span>
           </div>
           <div className="multi-select-actions">
+            <button
+              className="multi-btn danger"
+              onClick={() => {
+                const targets = displayItems.filter((i) => selectedIds.includes(i.id));
+                handleDeleteItems(targets);
+              }}
+              title="批量删除所选条目 (Delete)"
+            >
+              🗑️ 批量删除
+            </button>
             <button className="multi-btn primary" onClick={() => handlePasteMultiple(selectedIds)}>
               ↵ 换行合并粘贴
             </button>
@@ -2557,6 +2895,25 @@ const MainPanel: React.FC = () => {
                     </div>
                   </div>
                 )}
+                <div className="settings-row" style={{ marginTop: "12px" }}>
+                  <div className="settings-label-group">
+                    <span className="settings-label">历史容量上限 (LRU 自动淘汰)</span>
+                    <span className="settings-desc">超额时自动清理最旧未置顶条目与孤立图片（置顶项永久豁免）</span>
+                  </div>
+                  <div className="capacity-btn-group">
+                    {[50, 200, 500, 1000].map((cap) => (
+                      <button
+                        key={cap}
+                        type="button"
+                        className={`capacity-pill-btn ${historyCapacity === cap ? "active" : ""}`}
+                        onClick={() => handleSetCapacity(cap)}
+                        title={`设置历史容量为 ${cap} 条`}
+                      >
+                        {cap} 条
+                      </button>
+                    ))}
+                  </div>
+                </div>
               </div>
 
               {/* 5. 原生灾备归档 (.clipbak) (Issue #19) */}
@@ -2710,6 +3067,18 @@ const MainPanel: React.FC = () => {
               )}
             </div>
           </div>
+        </div>
+      )}
+
+      {/* 3 秒撤销通知悬浮气泡 (Safety Net) */}
+      {undoToast && (
+        <div className="undo-toast-bubble">
+          <span>{undoToast.text}</span>
+          {undoToast.showUndo && (
+            <button className="undo-toast-btn" onClick={handleUndoDelete}>
+              撤销 (Ctrl+Z)
+            </button>
+          )}
         </div>
       )}
     </div>

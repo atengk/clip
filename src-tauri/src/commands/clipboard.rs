@@ -66,6 +66,53 @@ pub fn toggle_pin(
         .map_err(|e| format!("更新置顶状态失败: {e}"))
 }
 
+/// 删除指定单条历史记录
+///
+/// @param state 全局应用共享状态
+/// @param id 条目唯一 ID
+/// @return 是否成功删除
+#[tauri::command]
+pub fn delete_entry(
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<bool, String> {
+    state
+        .engine
+        .delete_entry(id)
+        .map_err(|e| format!("删除条目失败: {e}"))
+}
+
+/// 批量删除指定历史记录
+///
+/// @param state 全局应用共享状态
+/// @param ids 条目唯一 ID 列表
+/// @return 实际删除条数
+#[tauri::command]
+pub fn delete_entries(
+    state: State<'_, AppState>,
+    ids: Vec<i64>,
+) -> Result<usize, String> {
+    state
+        .engine
+        .delete_entries(&ids)
+        .map_err(|e| format!("批量删除条目失败: {e}"))
+}
+
+/// 获取当前历史记录容量上限
+#[tauri::command]
+pub fn get_history_capacity(state: State<'_, AppState>) -> usize {
+    state.engine.get_max_capacity()
+}
+
+/// 设置历史记录容量上限 (50 / 200 / 500 / 1000)
+#[tauri::command]
+pub fn set_history_capacity(state: State<'_, AppState>, capacity: usize) -> Result<(), String> {
+    state
+        .engine
+        .set_max_capacity(capacity)
+        .map_err(|e| format!("设置容量上限失败: {e}"))
+}
+
 
 
 /// 安全隐藏主面板

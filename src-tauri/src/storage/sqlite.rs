@@ -600,6 +600,31 @@ impl Storage for SqliteStorage {
             .unwrap_or(0);
         Ok((entries_count, snippets_count))
     }
+
+    fn delete_entry(&self, id: i64) -> Result<bool, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let affected = conn
+            .execute("DELETE FROM clipboard_entries WHERE id = ?1", params![id])
+            .map_err(|e| StorageError::DatabaseError(format!("删除条目失败: {e}")))?;
+        Ok(affected > 0)
+    }
+
+    fn delete_entries(&self, ids: &[i64]) -> Result<usize, StorageError> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let conn = self.conn.lock().unwrap();
+        let placeholders: Vec<String> = (1..=ids.len()).map(|i| format!("?{i}")).collect();
+        let sql = format!(
+            "DELETE FROM clipboard_entries WHERE id IN ({})",
+            placeholders.join(",")
+        );
+        let params: Vec<&dyn rusqlite::ToSql> = ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+        let affected = conn
+            .execute(&sql, rusqlite::params_from_iter(params))
+            .map_err(|e| StorageError::DatabaseError(format!("批量删除条目失败: {e}")))?;
+        Ok(affected)
+    }
 }
 
 /// 提取文本的简拼与全拼基础索引 (小写)
@@ -885,6 +910,29 @@ mod tests {
             storage.get_metadata("global_shortcut").unwrap(),
             Some("Ctrl+Alt+V".to_string())
         );
+    }
+
+    #[test]
+    fn test_sqlite_delete_entry_and_entries() {
+        let storage = SqliteStorage::new_in_memory().unwrap();
+        let e1 = storage.insert_text("item 1", "item 1", "i1", "item1").unwrap();
+        let e2 = storage.insert_text("item 2", "item 2", "i2", "item2").unwrap();
+        let e3 = storage.insert_text("item 3", "item 3", "i3", "item3").unwrap();
+
+        // 1. 单条删除
+        let deleted = storage.delete_entry(e1.id).unwrap();
+        assert!(deleted, "应当成功删除存在的条目");
+        assert!(storage.get_entry_by_id(e1.id).unwrap().is_none());
+
+        // 验证 FTS5 同步被清理
+        let search_res = storage.search_entries("item 1", 10).unwrap();
+        assert!(search_res.is_empty(), "删除后 FTS 全文索引必须同步清除");
+
+        // 2. 批量删除
+        let affected = storage.delete_entries(&[e2.id, e3.id]).unwrap();
+        assert_eq!(affected, 2, "应当批量删除 2 条记录");
+        let remaining = storage.get_recent_entries(10).unwrap();
+        assert!(remaining.is_empty(), "所有条目应被完全清空");
     }
 }
 

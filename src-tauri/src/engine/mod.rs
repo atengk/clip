@@ -27,6 +27,7 @@ use crate::engine::transform::{TextTransformer, TransformAction};
 use crate::pal::{PalError, PlatformDriver};
 use crate::storage::{ClipboardEntry, Snippet, Storage, StorageError};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use thiserror::Error;
@@ -93,7 +94,7 @@ pub struct ClipboardEngine {
     last_captured_text: Mutex<Option<String>>,
     paste_suppression: Mutex<Option<(String, Instant)>>,
     paste_suppression_image: Mutex<Option<(String, Instant)>>,
-    max_capacity: usize,
+    max_capacity: AtomicUsize,
     privacy_filter: PrivacyFilter,
     blob_dir: PathBuf,
     queue_manager: Arc<PasteQueueManager>,
@@ -108,13 +109,19 @@ impl ClipboardEngine {
     pub fn new(driver: Arc<dyn PlatformDriver>, storage: Arc<dyn Storage>) -> Self {
         let default_blob_dir = std::env::temp_dir().join("clip_blobs");
         let _ = std::fs::create_dir_all(&default_blob_dir);
+        let initial_capacity = storage
+            .get_metadata("history_capacity")
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_MAX_CAPACITY);
         Self {
             driver,
             storage,
             last_captured_text: Mutex::new(None),
             paste_suppression: Mutex::new(None),
             paste_suppression_image: Mutex::new(None),
-            max_capacity: DEFAULT_MAX_CAPACITY,
+            max_capacity: AtomicUsize::new(initial_capacity),
             privacy_filter: PrivacyFilter::new(),
             blob_dir: default_blob_dir,
             queue_manager: Arc::new(PasteQueueManager::new()),
@@ -136,8 +143,8 @@ impl ClipboardEngine {
     ///
     /// @param capacity 容量上限值
     /// @return 链式返回 Self
-    pub fn with_capacity(mut self, capacity: usize) -> Self {
-        self.max_capacity = capacity;
+    pub fn with_capacity(self, capacity: usize) -> Self {
+        self.max_capacity.store(capacity, Ordering::Relaxed);
         self
     }
 
@@ -177,6 +184,24 @@ impl ClipboardEngine {
         Ok(removed_count)
     }
 
+    /// 获取当前生效的历史记录容量上限
+    pub fn get_max_capacity(&self) -> usize {
+        self.max_capacity.load(Ordering::Relaxed)
+    }
+
+    /// 设置历史记录容量上限并持久化保存
+    pub fn set_max_capacity(&self, capacity: usize) -> Result<(), EngineError> {
+        let cap = capacity.max(1);
+        self.max_capacity.store(cap, Ordering::Relaxed);
+        let _ = self
+            .storage
+            .set_metadata("history_capacity", &cap.to_string());
+        // 立即触发一次超容清理
+        let _ = self.storage.prune_lru(cap);
+        let _ = self.prune_orphan_blobs();
+        Ok(())
+    }
+
     /// 处理剪贴板变更事件
     ///
     /// 包含隐私过滤拦截、防环校验、已有历史 Bump-to-Top、超大文本 Payload Guard 索引熔断及 LRU 淘汰。
@@ -214,7 +239,7 @@ impl ClipboardEngine {
                 // 检索已有历史记录执行图片 Bump-to-Top 策略（支持重复复制图片的置顶时间戳刷新）
                 if let Some(existing) = self.storage.find_by_content(&hash)? {
                     let bumped = self.storage.bump_to_top(existing.id)?;
-                    let _ = self.storage.prune_lru(self.max_capacity);
+                    let _ = self.storage.prune_lru(self.get_max_capacity());
                     let _ = self.prune_orphan_blobs();
                     self.queue_manager.push(QueueItem {
                         id: bumped.id,
@@ -234,7 +259,7 @@ impl ClipboardEngine {
                 let entry = self.storage.insert_image(&hash, "", "", "")?;
 
                 // 触发 LRU 淘汰与孤立 Blob GC
-                let _ = self.storage.prune_lru(self.max_capacity);
+                let _ = self.storage.prune_lru(self.get_max_capacity());
                 let _ = self.prune_orphan_blobs();
 
                 self.queue_manager.push(QueueItem {
@@ -266,7 +291,7 @@ impl ClipboardEngine {
         // 5. 检索已有历史记录执行 Bump-to-Top 策略（支持连续相同文本的置顶时间戳刷新）
         if let Some(existing) = self.storage.find_by_content(&current_text)? {
             let bumped = self.storage.bump_to_top(existing.id)?;
-            let _ = self.storage.prune_lru(self.max_capacity);
+            let _ = self.storage.prune_lru(self.get_max_capacity());
             let _ = self.prune_orphan_blobs();
 
             let mut last_guard = self.last_captured_text.lock().unwrap();
@@ -315,7 +340,7 @@ impl ClipboardEngine {
         let entry = self.storage.insert_text(&current_text, index_text, &pinyin_first, &pinyin_full)?;
 
         // 8. 触发 LRU 淘汰清理超容记录并清理孤立图片 Blob
-        let _ = self.storage.prune_lru(self.max_capacity);
+        let _ = self.storage.prune_lru(self.get_max_capacity());
         let _ = self.prune_orphan_blobs();
 
         let mut last_guard = self.last_captured_text.lock().unwrap();
@@ -530,6 +555,30 @@ impl ClipboardEngine {
         self.storage
             .save_snippet(id, title, content, shortcut)
             .map_err(EngineError::Storage)
+    }
+
+    /// 删除单条剪贴板历史记录并级联清理孤立图片 Blob
+    ///
+    /// @param id 条目主键 ID
+    /// @return 成功删除返回 true，条目不存在返回 false
+    pub fn delete_entry(&self, id: i64) -> Result<bool, EngineError> {
+        let deleted = self.storage.delete_entry(id).map_err(EngineError::Storage)?;
+        if deleted {
+            let _ = self.prune_orphan_blobs();
+        }
+        Ok(deleted)
+    }
+
+    /// 批量删除剪贴板历史记录并级联清理孤立图片 Blob
+    ///
+    /// @param ids 待删除的条目主键 ID 列表
+    /// @return 实际删除记录数
+    pub fn delete_entries(&self, ids: &[i64]) -> Result<usize, EngineError> {
+        let count = self.storage.delete_entries(ids).map_err(EngineError::Storage)?;
+        if count > 0 {
+            let _ = self.prune_orphan_blobs();
+        }
+        Ok(count)
     }
 
     /// 删除指定常用短语模板
@@ -1308,5 +1357,39 @@ mod tests {
         // 动态设置并持久化
         engine.set_global_shortcut("Ctrl+Shift+V").unwrap();
         assert_eq!(engine.get_global_shortcut(), "Ctrl+Shift+V");
+    }
+
+    #[test]
+    fn test_engine_history_capacity_dynamic_and_eviction() {
+        let (driver, engine) = setup_engine();
+
+        // 默认上限为 1000 (DEFAULT_MAX_CAPACITY)
+        assert_eq!(engine.get_max_capacity(), DEFAULT_MAX_CAPACITY);
+
+        // 设置上限为 3
+        engine.set_max_capacity(3).unwrap();
+        assert_eq!(engine.get_max_capacity(), 3);
+
+        // 插入第 1 条并置顶
+        driver.simulate_clipboard_change(Some("Pinned Item".into()));
+        let e1 = engine.handle_clipboard_change().unwrap().unwrap();
+        engine.toggle_pin(e1.id).unwrap();
+
+        // 连续插入 4 条普通记录
+        for i in 1..=4 {
+            driver.simulate_clipboard_change(Some(format!("Item {i}")));
+            let _ = engine.handle_clipboard_change().unwrap();
+        }
+
+        // 当前保留 1 条置顶 + 3 条普通 = 4 条
+        let entries = engine.get_entries(10).unwrap();
+        assert_eq!(entries.len(), 4);
+        assert!(entries[0].is_pinned, "置顶条目必须永久豁免保留");
+        assert_eq!(entries[0].content, "Pinned Item");
+        assert_eq!(entries[1].content, "Item 4");
+        assert_eq!(entries[2].content, "Item 3");
+        assert_eq!(entries[3].content, "Item 2");
+        // Item 1 应该已经被 LRU 淘汰
+        assert!(entries.iter().all(|e| e.content != "Item 1"));
     }
 }
