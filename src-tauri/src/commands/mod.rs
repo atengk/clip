@@ -4,6 +4,7 @@
 //! @since 2026-10-06
 
 pub mod clipboard;
+pub mod updater;
 
 use crate::engine::ClipboardEngine;
 use std::sync::Arc;

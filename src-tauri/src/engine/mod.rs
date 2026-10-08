@@ -14,6 +14,7 @@ pub mod privacy;
 pub mod queue;
 pub mod snippet;
 pub mod transform;
+pub mod updater;
 
 use crate::engine::autostart::AutostartManager;
 use crate::engine::backup::{BackupArchive, BackupError, BackupManifest};

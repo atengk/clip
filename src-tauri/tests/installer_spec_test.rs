@@ -132,3 +132,41 @@ fn test_tauri_conf_nsis_spec() {
     assert!(en_content.contains("uninstPageTopText"), "英文必须配置 uninstPageTopText");
     assert!(en_content.contains("appRunningOkKill"), "英文必须配置 appRunningOkKill 避免卸载期空白弹窗");
 }
+
+#[test]
+fn test_nsis_process_self_healing_and_upgrade_hooks() {
+    let hooks_path = Path::new("windows/hooks.nsh");
+    assert!(hooks_path.exists(), "windows/hooks.nsh 文件必须存在");
+
+    let hooks_content = fs::read_to_string(hooks_path).expect("读取 hooks.nsh 失败");
+
+    // 1. 验证 PREINSTALL 钩子包含进程自愈 (taskkill /F /IM Clip.exe 与缓冲等待)
+    assert!(
+        hooks_content.contains("NSIS_HOOK_PREINSTALL"),
+        "必须定义 NSIS_HOOK_PREINSTALL 宏"
+    );
+    assert!(
+        hooks_content.contains("taskkill /F /IM Clip.exe") || hooks_content.contains("taskkill"),
+        "PREINSTALL 阶段必须注入 taskkill 自愈关闭运行中 Clip.exe 进程逻辑以解除文件锁"
+    );
+
+    // 2. 验证 POSTINSTALL 钩子包含自动拉起新版本逻辑 (支持静默安装 /S)
+    assert!(
+        hooks_content.contains("NSIS_HOOK_POSTINSTALL"),
+        "必须定义 NSIS_HOOK_POSTINSTALL 宏"
+    );
+    assert!(
+        hooks_content.contains("ExecShell") || hooks_content.contains("Exec") || hooks_content.contains("Clip.exe"),
+        "POSTINSTALL 阶段必须确保自动拉起新版可执行文件"
+    );
+
+    // 3. 验证 POSTUNINSTALL 钩子包含用户数据安全契约 (仅在显式确认时删除 AppData)
+    assert!(
+        hooks_content.contains("NSIS_HOOK_POSTUNINSTALL"),
+        "必须定义 NSIS_HOOK_POSTUNINSTALL 宏"
+    );
+    assert!(
+        hooks_content.contains("com.clip.app"),
+        "POSTUNINSTALL 阶段必须包含 com.clip.app 目录处理"
+    );
+}

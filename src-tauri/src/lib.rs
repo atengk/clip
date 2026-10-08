@@ -17,6 +17,7 @@ use crate::commands::clipboard::{
     toggle_pin, transform_and_paste_entry, get_global_shortcut, set_global_shortcut,
     get_storage_info, open_storage_dir, select_backup_save_path, select_backup_open_path,
 };
+use crate::commands::updater::execute_in_place_update;
 use crate::commands::AppState;
 use crate::engine::ClipboardEngine;
 use crate::pal::PlatformDriver;
@@ -400,7 +401,8 @@ pub fn run() {
             get_storage_info,
             open_storage_dir,
             select_backup_save_path,
-            select_backup_open_path
+            select_backup_open_path,
+            execute_in_place_update
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

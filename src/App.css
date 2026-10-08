@@ -2068,5 +2068,89 @@ kbd {
   transform: translateY(-1px);
 }
 
+/* 一键覆盖更新与下载进度样式 (Issue #20) */
+.btn-update-primary {
+  background: #6366f1;
+  color: #ffffff;
+  border: none;
+  padding: 6px 16px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: all 0.15s ease;
+  box-shadow: 0 1px 2px rgba(99, 102, 241, 0.2);
+}
+
+.btn-update-primary:hover:not(:disabled) {
+  background: #4f46e5;
+  transform: translateY(-1px);
+}
+
+.btn-update-primary:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.update-progress-section {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-top: 10px;
+}
+
+.update-progress-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+  color: var(--text-main);
+  font-weight: 500;
+  margin-bottom: 6px;
+}
+
+.update-progress-percent {
+  font-weight: 700;
+  color: #6366f1;
+}
+
+.update-progress-bar-bg {
+  width: 100%;
+  height: 8px;
+  background: #e2e8f0;
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 6px;
+}
+
+.update-progress-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #6366f1, #818cf8);
+  border-radius: 4px;
+  transition: width 0.15s ease;
+}
+
+.update-progress-footer {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: #64748b;
+}
+
+.update-error-banner {
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  color: #dc2626;
+  font-size: 12px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  margin-top: 10px;
+  line-height: 1.4;
+}
+
 
 

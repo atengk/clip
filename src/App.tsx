@@ -33,6 +33,15 @@ export interface StorageInfo {
 }
 
 /**
+ * GitHub Release 构件资产契约 (Issue #20)
+ */
+export interface GitHubReleaseAsset {
+  name: string;
+  browser_download_url: string;
+  size: number;
+}
+
+/**
  * GitHub Release 最新发布信息契约
  */
 export interface GitHubReleaseInfo {
@@ -41,6 +50,7 @@ export interface GitHubReleaseInfo {
   body: string;
   published_at: string;
   html_url: string;
+  assets?: GitHubReleaseAsset[];
 }
 
 /**
@@ -395,11 +405,20 @@ const MainPanel: React.FC = () => {
   const [storageInfo, setStorageInfo] = useState<StorageInfo | null>(null);
   const [copyPathFeedback, setCopyPathFeedback] = useState<boolean>(false);
 
-  // 在线更新检查状态 (Issue #19)
+  // 在线更新检查状态 (Issue #19 & #20)
   const [updateChecking, setUpdateChecking] = useState<boolean>(false);
   const [updateInfo, setUpdateInfo] = useState<GitHubReleaseInfo | null>(null);
   const [updateModalOpen, setUpdateModalOpen] = useState<boolean>(false);
   const [updateFeedback, setUpdateFeedback] = useState<{ type: "success" | "error" | "info"; text: string } | null>(null);
+  const [downloadingUpdate, setDownloadingUpdate] = useState<boolean>(false);
+  const [downloadProgress, setDownloadProgress] = useState<{
+    received: number;
+    total: number;
+    percent: number;
+    statusText: string;
+  }>({ received: 0, total: 0, percent: 0, statusText: "" });
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+  const downloadAbortRef = useRef<AbortController | null>(null);
 
   // 窗口钉住置顶 (WindowPinning) 与失焦自动隐藏保护
   const [isPinned, setIsPinned] = useState<boolean>(() => {
@@ -842,6 +861,8 @@ const MainPanel: React.FC = () => {
       const hasNew = compareSemVer(CURRENT_VERSION, data.tag_name) > 0;
       if (hasNew) {
         setUpdateInfo(data);
+        setDownloadingUpdate(false);
+        setDownloadError(null);
         setUpdateModalOpen(true);
       } else {
         if (isManual) {
@@ -862,6 +883,147 @@ const MainPanel: React.FC = () => {
       setUpdateChecking(false);
     }
   }, []);
+
+  /**
+   * 取消当前进行中的更新下载 (Issue #20)
+   */
+  const handleCancelUpdateDownload = useCallback(() => {
+    if (downloadAbortRef.current) {
+      downloadAbortRef.current.abort();
+      downloadAbortRef.current = null;
+    }
+    setDownloadingUpdate(false);
+    setDownloadProgress({ received: 0, total: 0, percent: 0, statusText: "" });
+  }, []);
+
+  /**
+   * 一键流式下载并静默覆盖升级 (Issue #20)
+   */
+  const handleStartInPlaceUpdate = useCallback(async () => {
+    if (!updateInfo) return;
+
+    const assets = updateInfo.assets || [];
+    // 1. 优先匹配 Windows x64 安装包
+    const setupAsset =
+      assets.find((a) => a.name.includes("Windows") && a.name.endsWith(".exe")) ||
+      assets.find((a) => a.name.endsWith("-Setup.exe") || a.name.endsWith(".exe"));
+
+    if (!setupAsset) {
+      setDownloadError("未检测到当前平台的自动化安装包，请点击下方前往 GitHub 网页下载。");
+      return;
+    }
+
+    const checksumsAsset = assets.find((a) => a.name === "checksums.txt");
+    let targetSha256: string | null = null;
+
+    setDownloadingUpdate(true);
+    setDownloadError(null);
+    setDownloadProgress({
+      received: 0,
+      total: setupAsset.size || 0,
+      percent: 0,
+      statusText: "准备连接下载源...",
+    });
+
+    const abortController = new AbortController();
+    downloadAbortRef.current = abortController;
+
+    try {
+      // 2. 尝试读取 checksums.txt 清单以执行 Checksum Gate 强校验
+      if (checksumsAsset) {
+        setDownloadProgress((prev) => ({ ...prev, statusText: "正在读取校验清单..." }));
+        try {
+          const checkResp = await fetch(checksumsAsset.browser_download_url, {
+            signal: abortController.signal,
+          });
+          if (checkResp.ok) {
+            const checkText = await checkResp.text();
+            for (const line of checkText.split("\n")) {
+              const parts = line.trim().split(/\s+/);
+              if (parts.length >= 2 && parts[1] === setupAsset.name) {
+                targetSha256 = parts[0];
+                break;
+              }
+            }
+          }
+        } catch {
+          // 清单读取异常不阻断，降级为直连下载
+        }
+      }
+
+      // 3. 流式下载目标安装包
+      setDownloadProgress((prev) => ({ ...prev, statusText: "正在下载更新安装包..." }));
+      const response = await fetch(setupAsset.browser_download_url, {
+        signal: abortController.signal,
+      });
+
+      if (!response.ok) {
+        throw new Error(`下载请求失败 (HTTP ${response.status})`);
+      }
+
+      const contentLength = response.headers.get("content-length");
+      const totalBytes = contentLength ? parseInt(contentLength, 10) : setupAsset.size || 0;
+
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new Error("当前环境不支持流式读取");
+      }
+
+      const chunks: Uint8Array[] = [];
+      let receivedBytes = 0;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) {
+          chunks.push(value);
+          receivedBytes += value.length;
+          const pct = totalBytes > 0 ? Math.min(100, (receivedBytes / totalBytes) * 100) : 0;
+          setDownloadProgress({
+            received: receivedBytes,
+            total: totalBytes,
+            percent: Math.round(pct),
+            statusText: `正在下载... (${Math.round(pct)}%)`,
+          });
+        }
+      }
+
+      // 4. 组装完整二进制数组
+      setDownloadProgress((prev) => ({
+        ...prev,
+        percent: 100,
+        statusText: "下载完成，正在执行完整性校验并准备静默覆盖升级...",
+      }));
+
+      const fullData = new Uint8Array(receivedBytes);
+      let offset = 0;
+      for (const chunk of chunks) {
+        fullData.set(chunk, offset);
+        offset += chunk.length;
+      }
+
+      // 5. 触发后端命令完成 Checksum Gate 校验与静默安装拉起
+      await invoke("execute_in_place_update", {
+        data: Array.from(fullData),
+        fileName: setupAsset.name,
+        expectedSha256: targetSha256,
+      });
+
+      setDownloadProgress((prev) => ({
+        ...prev,
+        statusText: "✓ 升级安装器已启动，正在原地覆盖更新并重启...",
+      }));
+    } catch (err: any) {
+      if (err.name === "AbortError") {
+        setDownloadError("已取消下载");
+      } else {
+        setDownloadError(`更新失败: ${err.message || err}`);
+      }
+      setDownloadingUpdate(false);
+    } finally {
+      downloadAbortRef.current = null;
+    }
+  }, [updateInfo]);
 
   /**
    * 唤起系统原生另存为对话框并执行备份导出 (Issue #19)
@@ -2455,19 +2617,26 @@ const MainPanel: React.FC = () => {
       )}
 
       {/* ========================================================================= */}
-      {/* 发现新版本更新提示模态框 (Issue #19)                                        */}
+      {/* 发现新版本更新提示模态框 (Issue #19 & #20)                                   */}
       {/* ========================================================================= */}
       {updateModalOpen && updateInfo && (
-        <div className="update-modal-overlay" onClick={() => setUpdateModalOpen(false)}>
+        <div
+          className="update-modal-overlay"
+          onClick={() => {
+            if (!downloadingUpdate) setUpdateModalOpen(false);
+          }}
+        >
           <div className="update-modal-card" onClick={(e) => e.stopPropagation()}>
             <div className="update-modal-header">
               <div className="update-modal-title">
                 <span>🚀 发现新版本可用</span>
                 <span className="update-new-version-badge">{updateInfo.tag_name}</span>
               </div>
-              <button className="update-modal-close-btn" onClick={() => setUpdateModalOpen(false)}>
-                ✕
-              </button>
+              {!downloadingUpdate && (
+                <button className="update-modal-close-btn" onClick={() => setUpdateModalOpen(false)}>
+                  ✕
+                </button>
+              )}
             </div>
             <div className="update-modal-body">
               <div className="update-release-title">{updateInfo.name || `Clip ${updateInfo.tag_name}`}</div>
@@ -2478,22 +2647,67 @@ const MainPanel: React.FC = () => {
                 <div className="update-notes-label">变更日志 (Release Notes)：</div>
                 <pre className="update-notes-content">{updateInfo.body || "暂无具体更新说明。"}</pre>
               </div>
+
+              {/* 流式下载进度展示 (Issue #20) */}
+              {downloadingUpdate && (
+                <div className="update-progress-section">
+                  <div className="update-progress-header">
+                    <span>{downloadProgress.statusText}</span>
+                    <span className="update-progress-percent">{downloadProgress.percent}%</span>
+                  </div>
+                  <div className="update-progress-bar-bg">
+                    <div
+                      className="update-progress-bar-fill"
+                      style={{ width: `${downloadProgress.percent}%` }}
+                    />
+                  </div>
+                  <div className="update-progress-footer">
+                    <span>
+                      {downloadProgress.received > 0
+                        ? `${(downloadProgress.received / (1024 * 1024)).toFixed(1)} MB`
+                        : ""}
+                      {downloadProgress.total > 0
+                        ? ` / ${(downloadProgress.total / (1024 * 1024)).toFixed(1)} MB`
+                        : ""}
+                    </span>
+                    <span>原地自愈覆盖 (免卸载)</span>
+                  </div>
+                </div>
+              )}
+
+              {/* 下载错误提示 */}
+              {downloadError && (
+                <div className="update-error-banner">
+                  ⚠️ {downloadError}
+                </div>
+              )}
             </div>
             <div className="update-modal-footer">
-              <button className="btn-update-dismiss" onClick={() => setUpdateModalOpen(false)}>
-                暂不更新
-              </button>
-              <button
-                className="btn-update-download"
-                onClick={() => {
-                  if (updateInfo.html_url) {
-                    openUrl(updateInfo.html_url);
-                  }
-                  setUpdateModalOpen(false);
-                }}
-              >
-                🌐 前往 GitHub 下载安装
-              </button>
+              {downloadingUpdate ? (
+                <button className="btn-update-dismiss" onClick={handleCancelUpdateDownload}>
+                  ✕ 取消下载
+                </button>
+              ) : (
+                <>
+                  <button className="btn-update-dismiss" onClick={() => setUpdateModalOpen(false)}>
+                    暂不更新
+                  </button>
+                  <button
+                    className="btn-update-download"
+                    onClick={() => {
+                      if (updateInfo.html_url) {
+                        openUrl(updateInfo.html_url);
+                      }
+                      setUpdateModalOpen(false);
+                    }}
+                  >
+                    🌐 前往 GitHub
+                  </button>
+                  <button className="btn-update-primary" onClick={handleStartInPlaceUpdate}>
+                    🚀 一键下载并安装
+                  </button>
+                </>
+              )}
             </div>
           </div>
         </div>
