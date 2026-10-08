@@ -416,9 +416,6 @@ const MainPanel: React.FC = () => {
   const [isRecordingShortcut, setIsRecordingShortcut] = useState<boolean>(false);
   const [shortcutFeedback, setShortcutFeedback] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
-  // 是否处于系统重命名免失焦守护态 (Windows In-Place Renaming Preservation)
-  const [isRenamingMode, setIsRenamingMode] = useState<boolean>(false);
-
   const inputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -1181,11 +1178,7 @@ const MainPanel: React.FC = () => {
       loadData(activeTabRef.current, queryRef.current);
     });
 
-    const unlistenPanelShown = listen<string>("panel-shown", (event) => {
-      const mode = event.payload;
-      const isRenaming = mode === "renaming";
-      setIsRenamingMode(isRenaming);
-
+    const unlistenPanelShown = listen("panel-shown", () => {
       setQuery("");
       setActiveTab("history");
       setFilterCategory("all");
@@ -1198,37 +1191,10 @@ const MainPanel: React.FC = () => {
       setSnippetModalOpen(false);
       setSettingsModalOpen(false);
 
-      if (!isRenaming) {
-        setTimeout(() => {
-          inputRef.current?.focus();
-          inputRef.current?.select();
-        }, 20);
-      }
-    });
-
-    const unlistenGlobalKeyNav = listen<string>("global-key-nav", (event) => {
-      const key = event.payload;
-      const items = displayItemsRef.current;
-      const curIdx = selectedIndexRef.current;
-
-      if (key === "up") {
-        setSelectedIndex((prev) => Math.max(0, prev - 1));
-      } else if (key === "down") {
-        setSelectedIndex((prev) => Math.min(Math.max(0, items.length - 1), prev + 1));
-      } else if (key === "enter") {
-        const target = items[curIdx];
-        if (target) {
-          handleDispatchPaste(target);
-        }
-      } else if (key === "escape") {
-        handleClose();
-      } else if (/^[1-9]$/.test(key)) {
-        const digitIdx = parseInt(key, 10) - 1;
-        const target = items[digitIdx];
-        if (target) {
-          handleDispatchPaste(target);
-        }
-      }
+      setTimeout(() => {
+        inputRef.current?.focus();
+        inputRef.current?.select();
+      }, 20);
     });
 
     invoke<string>("get_global_shortcut")
@@ -1260,11 +1226,10 @@ const MainPanel: React.FC = () => {
       unlistenIncognito.then((f) => f());
       unlistenRestored.then((f) => f());
       unlistenPanelShown.then((f) => f());
-      unlistenGlobalKeyNav.then((f) => f());
       unlistenShortcutChanged.then((f) => f());
       unlistenFocus.then((f) => f());
     };
-  }, [loadData, handleClose, handleDispatchPaste]);
+  }, [loadData, handleClose]);
 
   // 全局键盘导航流闭环 (Issue #15)
   useEffect(() => {
@@ -1536,23 +1501,12 @@ const MainPanel: React.FC = () => {
               value={query}
               onChange={handleQueryChange}
               placeholder={
-                isRenamingMode
-                  ? "🔒 重命名免失焦守护中：可按 1~9 直贴，方向键选择，Enter 确认，Esc 退出"
-                  : activeTab === "snippets"
+                activeTab === "snippets"
                   ? "搜索常用短语 (支持标题、/快捷缩写或内容)..."
                   : "搜索剪贴板历史 (支持拼音简拼) 或输入 / 唤出短语..."
               }
-              autoFocus={!isRenamingMode}
-              readOnly={isRenamingMode}
+              autoFocus
             />
-            {isRenamingMode && (
-              <span
-                className="renaming-guardian-badge"
-                title="系统重命名免失焦守护态：当前输入焦点安全保留在原文件重命名框中"
-              >
-                🛡️ 免失焦守护
-              </span>
-            )}
             {query && (
               <button
                 className="search-clear-btn"

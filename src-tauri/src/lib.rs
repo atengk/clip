@@ -453,43 +453,11 @@ pub fn toggle_main_window(app_handle: &tauri::AppHandle) {
                     }
                 };
 
-                #[cfg(windows)]
-                {
-                    if crate::pal::windows::WindowsPlatformDriver::is_explorer_renaming() {
-                        if let Ok(hwnd) = window.hwnd() {
-                            crate::pal::windows::WindowsPlatformDriver::show_window_no_activate(
-                                hwnd.0 as isize,
-                                x,
-                                y,
-                                WIN_WIDTH,
-                                WIN_HEIGHT,
-                            );
-                            crate::pal::windows::WindowsPlatformDriver::install_popover_hooks(
-                                app_handle.clone(),
-                                hwnd.0 as isize,
-                            );
-                        }
-                        let _ = app_handle.emit("panel-shown", "renaming");
-                    } else {
-                        if let Ok(hwnd) = window.hwnd() {
-                            crate::pal::windows::WindowsPlatformDriver::remove_no_activate(hwnd.0 as isize);
-                            crate::pal::windows::WindowsPlatformDriver::uninstall_popover_hooks();
-                        }
-                        let _ = window.set_size(tauri::PhysicalSize::new(WIN_WIDTH as u32, WIN_HEIGHT as u32));
-                        let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
-                        let _ = window.show();
-                        let _ = window.set_focus();
-                        let _ = app_handle.emit("panel-shown", "normal");
-                    }
-                }
-                #[cfg(not(windows))]
-                {
-                    let _ = window.set_size(tauri::PhysicalSize::new(WIN_WIDTH as u32, WIN_HEIGHT as u32));
-                    let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                    let _ = app_handle.emit("panel-shown", "normal");
-                }
+                let _ = window.set_size(tauri::PhysicalSize::new(WIN_WIDTH as u32, WIN_HEIGHT as u32));
+                let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+                let _ = window.show();
+                let _ = window.set_focus();
+                let _ = app_handle.emit("panel-shown", ());
             }
         }
     }

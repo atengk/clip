@@ -7,12 +7,11 @@ use crate::pal::anchor::{
     calculate_flip_fit_position, AnchorPoint, ScreenRect, DEFAULT_ANCHOR_MARGIN,
 };
 use crate::pal::{PalError, PlatformDriver};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread;
-use tauri::{Emitter, Manager};
 use windows::Win32::Foundation::{
-    CloseHandle, HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+    CloseHandle, HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, POINT, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
     ClientToScreen, GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
@@ -24,26 +23,20 @@ use windows::Win32::System::DataExchange::{
 };
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 use windows::Win32::System::Threading::{
-    GetCurrentThreadId, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
+    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
     PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-    KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_CONTROL, VK_MENU, VK_V,
+    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
+    KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_CONTROL, VK_V,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-    GetClassNameW, GetCursorPos, GetForegroundWindow, GetGUIThreadInfo, GetMessageW,
-    GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId, IsWindowVisible,
-    PeekMessageW, PostQuitMessage, PostThreadMessageW, RegisterClassW,
-    SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, SetWindowsHookExW,
-    ShowWindow, TranslateMessage, UnhookWindowsHookEx,
-    CS_HREDRAW, CS_VREDRAW, GWL_EXSTYLE, HHOOK, HWND_TOPMOST,
-    KBDLLHOOKSTRUCT, MSLLHOOKSTRUCT, MSG, PM_NOREMOVE,
-    SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNOACTIVATE,
-    WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WM_CLIPBOARDUPDATE, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN,
-    WM_RBUTTONDOWN, WM_SYSKEYDOWN, WM_USER, WNDCLASSW, GUITHREADINFO,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
+    GetCursorPos, GetForegroundWindow, GetGUIThreadInfo, GetMessageW,
+    GetWindowThreadProcessId, PostQuitMessage, RegisterClassW,
+    SetForegroundWindow, TranslateMessage,
+    CS_HREDRAW, CS_VREDRAW, MSG, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WM_CLIPBOARDUPDATE, WM_DESTROY, WNDCLASSW, GUITHREADINFO,
 };
 
 /// 标准 Unicode 纯文本剪贴板格式 ID (CF_UNICODETEXT = 13)
@@ -52,182 +45,11 @@ const CF_UNICODETEXT: u32 = 13;
 /// 标准设备无关位图剪贴板格式 ID (CF_DIB = 8)
 const CF_DIB: u32 = 8;
 
-/// Win32 扩展样式 WS_EX_NOACTIVATE (0x08000000)
-const WS_EX_NOACTIVATE_STYLE: isize = 0x08000000;
-
 /// 线程安全的全局监听回调包装
 static GLOBAL_CALLBACK: RwLock<Option<Arc<dyn Fn() + Send + Sync>>> = RwLock::new(None);
 
 /// 记录激活悬浮窗前的系统原活动前台窗口句柄 (HWND)
 static PREVIOUS_FOREGROUND_WINDOW: RwLock<Option<isize>> = RwLock::new(None);
-
-/// 记录激活悬浮窗前是否处于 Windows 资源管理器/桌面的就地重命名状态
-static IS_EXPLORER_RENAMING: RwLock<bool> = RwLock::new(false);
-
-/// 专属 Popover 输入拦截守护线程单例初始化器
-static INIT_HOOK_THREAD_ONCE: std::sync::Once = std::sync::Once::new();
-/// 专属 Popover 输入拦截守护线程 ID
-static HOOK_THREAD_ID: AtomicU32 = AtomicU32::new(0);
-/// 当前处于展示状态的 Popover 所属 AppHandle
-static POPOVER_APP_HANDLE: RwLock<Option<tauri::AppHandle>> = RwLock::new(None);
-/// 当前处于展示状态的 Popover HWND 句柄数值
-static POPOVER_HWND: RwLock<Option<isize>> = RwLock::new(None);
-/// 键盘低级钩子句柄包装
-static KBD_HOOK: RwLock<Option<isize>> = RwLock::new(None);
-/// 鼠标低级钩子句柄包装
-static MOUSE_HOOK: RwLock<Option<isize>> = RwLock::new(None);
-
-const WM_INSTALL_HOOKS: u32 = WM_USER + 101;
-const WM_UNINSTALL_HOOKS: u32 = WM_USER + 102;
-
-/// 初始化全局底层输入拦截线程（具备独立 Win32 消息循环）
-fn init_hook_thread() {
-    INIT_HOOK_THREAD_ONCE.call_once(|| {
-        let (tx, rx) = std::sync::mpsc::channel();
-        thread::Builder::new()
-            .name("clip-popover-hook-thread".into())
-            .spawn(move || unsafe {
-                let mut msg = MSG::default();
-                // 触发创建当前线程的 Win32 消息队列
-                let _ = PeekMessageW(&mut msg, HWND(std::ptr::null_mut()), WM_USER, WM_USER, PM_NOREMOVE);
-
-                let thread_id = GetCurrentThreadId();
-                HOOK_THREAD_ID.store(thread_id, Ordering::SeqCst);
-                let _ = tx.send(());
-
-                while GetMessageW(&mut msg, HWND(std::ptr::null_mut()), 0, 0).as_bool() {
-                    if msg.message == WM_INSTALL_HOOKS {
-                        // 1. 先防御性卸载旧钩子，杜绝覆写泄漏
-                        let mut kbd_guard = KBD_HOOK.write().unwrap();
-                        if let Some(raw) = kbd_guard.take() {
-                            let _ = UnhookWindowsHookEx(HHOOK(raw as *mut _));
-                        }
-
-                        let mut mouse_guard = MOUSE_HOOK.write().unwrap();
-                        if let Some(raw) = mouse_guard.take() {
-                            let _ = UnhookWindowsHookEx(HHOOK(raw as *mut _));
-                        }
-
-                        // 2. 安装 WH_KEYBOARD_LL
-                        if let Ok(hook) = SetWindowsHookExW(
-                            WH_KEYBOARD_LL,
-                            Some(ll_keyboard_proc),
-                            windows::Win32::Foundation::HINSTANCE(std::ptr::null_mut()),
-                            0,
-                        ) {
-                            *kbd_guard = Some(hook.0 as isize);
-                        }
-
-                        // 3. 安装 WH_MOUSE_LL
-                        if let Ok(hook) = SetWindowsHookExW(
-                            WH_MOUSE_LL,
-                            Some(ll_mouse_proc),
-                            windows::Win32::Foundation::HINSTANCE(std::ptr::null_mut()),
-                            0,
-                        ) {
-                            *mouse_guard = Some(hook.0 as isize);
-                        }
-                    } else if msg.message == WM_UNINSTALL_HOOKS {
-                        let mut kbd_guard = KBD_HOOK.write().unwrap();
-                        if let Some(raw) = kbd_guard.take() {
-                            let _ = UnhookWindowsHookEx(HHOOK(raw as *mut _));
-                        }
-
-                        let mut mouse_guard = MOUSE_HOOK.write().unwrap();
-                        if let Some(raw) = mouse_guard.take() {
-                            let _ = UnhookWindowsHookEx(HHOOK(raw as *mut _));
-                        }
-                    }
-
-                    let _ = TranslateMessage(&msg);
-                    DispatchMessageW(&msg);
-                }
-            })
-            .expect("启动 Popover Hook 守护线程失败");
-
-        let _ = rx.recv();
-    });
-}
-
-/// 底层全局键盘事件拦截回调函数
-unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code >= 0 && (wparam.0 == WM_KEYDOWN as usize || wparam.0 == WM_SYSKEYDOWN as usize) {
-        // 1. 防御校验：检查当前 Popover 窗口是否存在且真实处于可见状态
-        let is_visible = {
-            let guard = POPOVER_HWND.read().unwrap();
-            match *guard {
-                Some(raw) => IsWindowVisible(HWND(raw as *mut _)).as_bool(),
-                None => false,
-            }
-        };
-
-        if is_visible {
-            let kbd = *(lparam.0 as *const KBDLLHOOKSTRUCT);
-            // 2. 检测修饰键状态（严格防御 Alt+Tab 等系统窗口切换操作）
-            let is_alt_down = (wparam.0 == WM_SYSKEYDOWN as usize)
-                || ((GetAsyncKeyState(VK_MENU.0 as i32) as u16 & 0x8000) != 0);
-            let is_ctrl_down = (GetAsyncKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0;
-
-            if let Some(key_action) = crate::pal::anchor::map_vk_to_popover_action(
-                kbd.vkCode as u16,
-                is_alt_down,
-                is_ctrl_down,
-            ) {
-                let app_opt = {
-                    let guard = POPOVER_APP_HANDLE.read().unwrap();
-                    guard.clone()
-                };
-                if let Some(app) = app_opt {
-                    if key_action == "escape" {
-                        if let Some(win) = app.get_webview_window("main") {
-                            let _ = win.hide();
-                        }
-                        WindowsPlatformDriver::uninstall_popover_hooks();
-                    }
-                    let _ = app.emit("global-key-nav", key_action);
-                }
-                // 阻断按键向宿主程序（如资源管理器）透传，保护原重命名框
-                return LRESULT(1);
-            }
-        }
-    }
-    CallNextHookEx(HHOOK(std::ptr::null_mut()), code, wparam, lparam)
-}
-
-/// 底层全局鼠标事件拦截回调函数 (检测外部点击并自动收起)
-unsafe extern "system" fn ll_mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code >= 0 && (wparam.0 == WM_LBUTTONDOWN as usize || wparam.0 == WM_RBUTTONDOWN as usize) {
-        let mouse = *(lparam.0 as *const MSLLHOOKSTRUCT);
-        let raw_hwnd = {
-            let guard = POPOVER_HWND.read().unwrap();
-            *guard
-        };
-        if let Some(raw) = raw_hwnd {
-            let hwnd = HWND(raw as *mut _);
-            let mut rect = RECT::default();
-            if GetWindowRect(hwnd, &mut rect).is_ok() {
-                if mouse.pt.x < rect.left
-                    || mouse.pt.x > rect.right
-                    || mouse.pt.y < rect.top
-                    || mouse.pt.y > rect.bottom
-                {
-                    // 点击发生在 Clip 窗口矩形外部：收起面板
-                    let app_opt = {
-                        let guard = POPOVER_APP_HANDLE.read().unwrap();
-                        guard.clone()
-                    };
-                    if let Some(app) = app_opt {
-                        if let Some(win) = app.get_webview_window("main") {
-                            let _ = win.hide();
-                        }
-                    }
-                    WindowsPlatformDriver::uninstall_popover_hooks();
-                }
-            }
-        }
-    }
-    CallNextHookEx(HHOOK(std::ptr::null_mut()), code, wparam, lparam)
-}
 
 /// 带重试机制安全打开 Win32 剪贴板
 fn open_clipboard_with_retry() -> Result<(), PalError> {
@@ -253,212 +75,97 @@ impl WindowsPlatformDriver {
         }
     }
 
-    /// 记录当前系统活动的前台窗口句柄与重命名态（在唤起悬浮面板前调用）
+    /// 记录当前系统活动的前台窗口句柄（在唤起悬浮面板前调用）
     pub fn capture_foreground_window() {
         let hwnd = unsafe { GetForegroundWindow() };
         if !hwnd.0.is_null() {
             let mut guard = PREVIOUS_FOREGROUND_WINDOW.write().unwrap();
             *guard = Some(hwnd.0 as isize);
-
-            // 探测前台是否处于资源管理器或桌面重命名态 (In-place Renaming)
-            let mut is_renaming = false;
-            unsafe {
-                let mut class_buf = [0u16; 64];
-                let len = GetClassNameW(hwnd, &mut class_buf);
-                if len > 0 {
-                    let class_name = String::from_utf16_lossy(&class_buf[..len as usize]);
-                    if class_name == "CabinetWClass"
-                        || class_name == "ExploreWClass"
-                        || class_name == "Progman"
-                        || class_name == "WorkerW"
-                    {
-                        let thread_id = GetWindowThreadProcessId(hwnd, None);
-                        let mut gui_info = GUITHREADINFO {
-                            cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
-                            ..Default::default()
-                        };
-                        if GetGUIThreadInfo(thread_id, &mut gui_info).is_ok()
-                            && !gui_info.hwndFocus.0.is_null()
-                        {
-                            let mut focus_buf = [0u16; 64];
-                            let focus_len = GetClassNameW(gui_info.hwndFocus, &mut focus_buf);
-                            if focus_len > 0 {
-                                let focus_class = String::from_utf16_lossy(&focus_buf[..focus_len as usize]);
-                                if focus_class.eq_ignore_ascii_case("Edit") {
-                                    is_renaming = true;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            let mut rename_guard = IS_EXPLORER_RENAMING.write().unwrap();
-            *rename_guard = is_renaming;
         }
-    }
-
-    /// 获取当前前台是否捕获到处于资源管理器重命名态
-    pub fn is_explorer_renaming() -> bool {
-        let guard = IS_EXPLORER_RENAMING.read().unwrap();
-        *guard
     }
 
     /// 恢复上一个活动窗口的前台焦点状态
-pub fn restore_foreground_window() {
-    let prev_opt = {
-        let guard = PREVIOUS_FOREGROUND_WINDOW.read().unwrap();
-        *guard
-    };
-    if let Some(raw_hwnd) = prev_opt {
-        unsafe {
-            let hwnd = HWND(raw_hwnd as *mut _);
-            let _ = SetForegroundWindow(hwnd);
+    pub fn restore_foreground_window() {
+        let prev_opt = {
+            let guard = PREVIOUS_FOREGROUND_WINDOW.read().unwrap();
+            *guard
+        };
+        if let Some(raw_hwnd) = prev_opt {
+            unsafe {
+                let hwnd = HWND(raw_hwnd as *mut _);
+                let _ = SetForegroundWindow(hwnd);
+            }
         }
     }
-}
 
-/// 计算光标吸附与四向翻转展示坐标 (WindowAnchor & Flip-fit Anchor)
-pub fn get_window_anchor_position(win_width: i32, win_height: i32) -> (i32, i32) {
-    unsafe {
-        // 1. 尝试获取活动前台窗口的输入光标 (Caret)
-        let foreground_hwnd = GetForegroundWindow();
-        let thread_id = GetWindowThreadProcessId(foreground_hwnd, None);
-        let mut gui_info = GUITHREADINFO {
-            cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
-            ..Default::default()
-        };
-
-        let mut anchor = None;
-        if GetGUIThreadInfo(thread_id, &mut gui_info).is_ok() && !gui_info.hwndCaret.0.is_null() {
-            let mut pt = POINT {
-                x: gui_info.rcCaret.left,
-                y: gui_info.rcCaret.bottom,
+    /// 计算光标吸附与四向翻转展示坐标 (WindowAnchor & Flip-fit Anchor)
+    pub fn get_window_anchor_position(win_width: i32, win_height: i32) -> (i32, i32) {
+        unsafe {
+            // 1. 尝试获取活动前台窗口的输入光标 (Caret)
+            let foreground_hwnd = GetForegroundWindow();
+            let thread_id = GetWindowThreadProcessId(foreground_hwnd, None);
+            let mut gui_info = GUITHREADINFO {
+                cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+                ..Default::default()
             };
-            if ClientToScreen(gui_info.hwndCaret, &mut pt).as_bool() {
-                if pt.x != 0 || pt.y != 0 {
-                    anchor = Some(AnchorPoint::new(pt.x, pt.y));
+
+            let mut anchor = None;
+            if GetGUIThreadInfo(thread_id, &mut gui_info).is_ok() && !gui_info.hwndCaret.0.is_null() {
+                let mut pt = POINT {
+                    x: gui_info.rcCaret.left,
+                    y: gui_info.rcCaret.bottom,
+                };
+                if ClientToScreen(gui_info.hwndCaret, &mut pt).as_bool() {
+                    if pt.x != 0 || pt.y != 0 {
+                        anchor = Some(AnchorPoint::new(pt.x, pt.y));
+                    }
                 }
             }
-        }
 
-        // 2. 若无有效输入光标，回退获取鼠标指针位置 (Mouse Pointer)
-        let anchor_point = match anchor {
-            Some(p) => p,
-            None => {
-                let mut cursor_pt = POINT { x: 0, y: 0 };
-                if GetCursorPos(&mut cursor_pt).is_ok() {
-                    AnchorPoint::new(cursor_pt.x, cursor_pt.y)
-                } else {
-                    AnchorPoint::new(100, 100)
+            // 2. 若无有效输入光标，回退获取鼠标指针位置 (Mouse Pointer)
+            let anchor_point = match anchor {
+                Some(p) => p,
+                None => {
+                    let mut cursor_pt = POINT { x: 0, y: 0 };
+                    if GetCursorPos(&mut cursor_pt).is_ok() {
+                        AnchorPoint::new(cursor_pt.x, cursor_pt.y)
+                    } else {
+                        AnchorPoint::new(100, 100)
+                    }
                 }
-            }
-        };
+            };
 
-        // 3. 获取锚点所在的显示器工作区 (避让任务栏)
-        let pt = POINT {
-            x: anchor_point.x,
-            y: anchor_point.y,
-        };
-        let hmonitor = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
-        let mut mon_info = MONITORINFO {
-            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-            ..Default::default()
-        };
+            // 3. 获取锚点所在的显示器工作区 (避让任务栏)
+            let pt = POINT {
+                x: anchor_point.x,
+                y: anchor_point.y,
+            };
+            let hmonitor = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+            let mut mon_info = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
 
-        let work_area = if GetMonitorInfoW(hmonitor, &mut mon_info).as_bool() {
-            ScreenRect::new(
-                mon_info.rcWork.left,
-                mon_info.rcWork.top,
-                mon_info.rcWork.right,
-                mon_info.rcWork.bottom,
+            let work_area = if GetMonitorInfoW(hmonitor, &mut mon_info).as_bool() {
+                ScreenRect::new(
+                    mon_info.rcWork.left,
+                    mon_info.rcWork.top,
+                    mon_info.rcWork.right,
+                    mon_info.rcWork.bottom,
+                )
+            } else {
+                ScreenRect::new(0, 0, 1920, 1040)
+            };
+
+            // 4. 执行四向翻转贴靠算法 (Flip-fit Anchor)
+            calculate_flip_fit_position(
+                anchor_point,
+                win_width,
+                win_height,
+                work_area,
+                DEFAULT_ANCHOR_MARGIN,
             )
-        } else {
-            ScreenRect::new(0, 0, 1920, 1040)
-        };
-
-        // 4. 执行四向翻转贴靠算法 (Flip-fit Anchor)
-        calculate_flip_fit_position(
-            anchor_point,
-            win_width,
-            win_height,
-            work_area,
-            DEFAULT_ANCHOR_MARGIN,
-        )
-    }
-}
-
-    /// 为窗口应用 WS_EX_NOACTIVATE 扩展样式，防止抢夺焦点破坏宿主程序就地编辑
-    pub fn ensure_no_activate(raw_hwnd: isize) {
-        unsafe {
-            let hwnd = HWND(raw_hwnd as *mut _);
-            let current = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-            let _ = SetWindowLongPtrW(hwnd, GWL_EXSTYLE, current | WS_EX_NOACTIVATE_STYLE);
         }
-    }
-
-    /// 移除 WS_EX_NOACTIVATE 扩展样式，恢复常规可获取焦点状态
-    pub fn remove_no_activate(raw_hwnd: isize) {
-        unsafe {
-            let hwnd = HWND(raw_hwnd as *mut _);
-            let current = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-            let _ = SetWindowLongPtrW(hwnd, GWL_EXSTYLE, current & !WS_EX_NOACTIVATE_STYLE);
-        }
-    }
-
-    /// 以免激活原子操作展示并设置窗口坐标与尺寸 (SW_SHOWNOACTIVATE + SWP_NOACTIVATE | SWP_SHOWWINDOW)
-    pub fn show_window_no_activate(raw_hwnd: isize, x: i32, y: i32, width: i32, height: i32) {
-        unsafe {
-            Self::ensure_no_activate(raw_hwnd);
-            let hwnd = HWND(raw_hwnd as *mut _);
-            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-            let _ = SetWindowPos(
-                hwnd,
-                HWND_TOPMOST,
-                x,
-                y,
-                width,
-                height,
-                SWP_NOACTIVATE | SWP_SHOWWINDOW,
-            );
-        }
-    }
-
-    /// 隐藏指定窗口
-    pub fn hide_window(raw_hwnd: isize) {
-        unsafe {
-            let hwnd = HWND(raw_hwnd as *mut _);
-            let _ = ShowWindow(hwnd, SW_HIDE);
-        }
-    }
-
-    /// 安装轻量底层键盘/鼠标输入钩子 (WH_KEYBOARD_LL + WH_MOUSE_LL)
-    pub fn install_popover_hooks(app_handle: tauri::AppHandle, raw_hwnd: isize) {
-        init_hook_thread();
-        {
-            let mut app_guard = POPOVER_APP_HANDLE.write().unwrap();
-            *app_guard = Some(app_handle);
-            let mut hwnd_guard = POPOVER_HWND.write().unwrap();
-            *hwnd_guard = Some(raw_hwnd);
-        }
-        let thread_id = HOOK_THREAD_ID.load(Ordering::SeqCst);
-        if thread_id != 0 {
-            unsafe {
-                let _ = PostThreadMessageW(thread_id, WM_INSTALL_HOOKS, WPARAM(0), LPARAM(0));
-            }
-        }
-    }
-
-    /// 卸载底层键盘/鼠标输入钩子并清理全局引用
-    pub fn uninstall_popover_hooks() {
-        let thread_id = HOOK_THREAD_ID.load(Ordering::SeqCst);
-        if thread_id != 0 {
-            unsafe {
-                let _ = PostThreadMessageW(thread_id, WM_UNINSTALL_HOOKS, WPARAM(0), LPARAM(0));
-            }
-        }
-        // 重置静态持有的 AppHandle 与 HWND，避免悬垂引用与状态残留
-        *POPOVER_APP_HANDLE.write().unwrap() = None;
-        *POPOVER_HWND.write().unwrap() = None;
     }
 }
 
@@ -549,11 +256,6 @@ impl PlatformDriver for WindowsPlatformDriver {
             // 1. 显式还原原前台窗口焦点
             Self::restore_foreground_window();
             thread::sleep(std::time::Duration::from_millis(35));
-
-            {
-                let mut guard = IS_EXPLORER_RENAMING.write().unwrap();
-                *guard = false; // 消费后及时重置状态
-            }
 
             // 构造按键模拟辅助闭包
             let make_key_input = |vk: VIRTUAL_KEY, is_up: bool| -> INPUT {
