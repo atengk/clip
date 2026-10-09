@@ -141,6 +141,99 @@ pub fn launch_silent_installer(installer_path: &Path) -> Result<(), UpdaterError
     }
 }
 
+/// 原生多通道流式容灾下载引擎 (Native Download Engine)
+///
+/// 依次尝试候选下载端点，首选官方直链（可自动穿透系统代理），连接受阻时自动无缝降级至备用国内加速镜像通道。
+///
+/// @param endpoints 候选下载端点列表 (通道名称, 下载URL)
+/// @param target_path 本地写入临时文件路径
+/// @param on_progress 进度回调闭包 (已接收字节数, 总字节数, 当前活动通道名称)
+/// @return 成功命中的下载通道名称
+pub async fn download_with_fallback<F>(
+    endpoints: &[(String, String)],
+    target_path: &Path,
+    mut on_progress: F,
+) -> Result<String, UpdaterError>
+where
+    F: FnMut(u64, u64, &str),
+{
+    use futures_util::StreamExt;
+    use std::io::Write;
+    use std::time::Duration;
+
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(6))
+        .timeout(Duration::from_secs(300))
+        .build()
+        .map_err(|e| UpdaterError::Network(format!("创建 HTTP 客户端失败: {e}")))?;
+
+    let mut last_err = String::from("无可用候选节点");
+
+    for (name, url) in endpoints {
+        on_progress(0, 0, name);
+
+        let response = match client.get(url).send().await {
+            Ok(resp) => {
+                if resp.status().is_success() {
+                    resp
+                } else {
+                    last_err = format!("通道 {name} 返回 HTTP 状态码: {}", resp.status());
+                    continue;
+                }
+            }
+            Err(e) => {
+                last_err = format!("通道 {name} 连接异常: {e}");
+                continue;
+            }
+        };
+
+        let total_bytes = response.content_length().unwrap_or(0);
+        let mut file = match File::create(target_path) {
+            Ok(f) => f,
+            Err(e) => return Err(UpdaterError::Io(e)),
+        };
+
+        let mut stream = response.bytes_stream();
+        let mut received: u64 = 0;
+        let mut stream_failed = false;
+
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(chunk) => {
+                    if let Err(e) = file.write_all(&chunk) {
+                        let _ = std::fs::remove_file(target_path);
+                        return Err(UpdaterError::Io(e));
+                    }
+                    received += chunk.len() as u64;
+                    on_progress(received, total_bytes, name);
+                }
+                Err(e) => {
+                    last_err = format!("通道 {name} 流式读取中断: {e}");
+                    stream_failed = true;
+                    break;
+                }
+            }
+        }
+
+        if stream_failed {
+            let _ = std::fs::remove_file(target_path);
+            continue;
+        }
+
+        let _ = file.flush();
+
+        if total_bytes > 0 && received < total_bytes {
+            last_err = format!("通道 {name} 数据接收不完整: {received}/{total_bytes}");
+            let _ = std::fs::remove_file(target_path);
+            continue;
+        }
+
+        return Ok(name.clone());
+    }
+
+    Err(UpdaterError::Network(format!("所有加速与直连通道连接均受限: {last_err}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

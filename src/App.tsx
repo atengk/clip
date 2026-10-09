@@ -20,7 +20,7 @@ import "./App.css";
 /**
  * 当前客户端编译版本号 (SemVer)
  */
-export const CURRENT_VERSION = "v1.2.6";
+export const CURRENT_VERSION = "v1.2.7";
 
 /**
  * 存储状态与磁盘占用摘要信息契约 (遵循 Issue #19)
@@ -1050,8 +1050,29 @@ const MainPanel: React.FC = () => {
     setDownloadProgress({ received: 0, total: 0, percent: 0, statusText: "" });
   }, []);
 
+  // 监听 Rust 原生下载引擎流式进度事件 (update-download-progress)
+  useEffect(() => {
+    const unlistenPromise = listen<{
+      received_bytes: number;
+      total_bytes: number;
+      percentage: number;
+      status: string;
+    }>("update-download-progress", (event) => {
+      setDownloadProgress({
+        received: event.payload.received_bytes,
+        total: event.payload.total_bytes,
+        percent: Math.round(event.payload.percentage),
+        statusText: event.payload.status,
+      });
+    });
+
+    return () => {
+      unlistenPromise.then((unlisten) => unlisten());
+    };
+  }, []);
+
   /**
-   * 一键流式下载并静默覆盖升级 (Issue #20)
+   * 一键流式下载并静默覆盖升级 (基于 Rust 原生下载引擎，免疫 CORS 跨域限制，自动继承系统代理)
    */
   const handleStartInPlaceUpdate = useCallback(async () => {
     if (!updateInfo) return;
@@ -1076,26 +1097,22 @@ const MainPanel: React.FC = () => {
       received: 0,
       total: setupAsset.size || 0,
       percent: 0,
-      statusText: "准备连接下载源...",
+      statusText: "准备连接原生下载引擎...",
     });
 
-    const abortController = new AbortController();
-    downloadAbortRef.current = abortController;
-
     try {
-      // 2. 尝试读取 checksums.txt 清单以执行 Checksum Gate 强校验 (多通道回退)
+      // 2. 尝试读取 checksums.txt 清单以执行 Checksum Gate 强校验
       if (checksumsAsset) {
         setDownloadProgress((prev) => ({ ...prev, statusText: "正在读取校验清单..." }));
         const checkCandidates = [
           checksumsAsset.browser_download_url,
-          `https://ghfast.top/${checksumsAsset.browser_download_url}`,
+          `https://ghproxy.cn/${checksumsAsset.browser_download_url}`,
+          `https://mirror.ghproxy.com/${checksumsAsset.browser_download_url}`,
           `https://ghproxy.net/${checksumsAsset.browser_download_url}`,
         ];
         for (const checkUrl of checkCandidates) {
           try {
-            const checkResp = await fetch(checkUrl, {
-              signal: abortController.signal,
-            });
+            const checkResp = await fetch(checkUrl);
             if (checkResp.ok) {
               const checkText = await checkResp.text();
               for (const line of checkText.split("\n")) {
@@ -1108,97 +1125,14 @@ const MainPanel: React.FC = () => {
               if (targetSha256) break;
             }
           } catch {
-            // 单节点异常自动回退
+            // 节点容灾回退
           }
         }
       }
 
-      // 3. 多通道流式下载目标安装包 (直连优先，受阻自动降级国内加速镜像)
-      const downloadEndpoints = [
-        { name: "GitHub 节点", url: setupAsset.browser_download_url },
-        { name: "国内加速通道 A", url: `https://ghfast.top/${setupAsset.browser_download_url}` },
-        { name: "国内加速通道 B", url: `https://ghproxy.net/${setupAsset.browser_download_url}` },
-      ];
-
-      let response: Response | null = null;
-      let activeEndpointName = "";
-
-      for (let i = 0; i < downloadEndpoints.length; i++) {
-        const ep = downloadEndpoints[i];
-        if (abortController.signal.aborted) break;
-
-        setDownloadProgress((prev) => ({
-          ...prev,
-          statusText: i === 0 ? "正在连接下载节点..." : `直连受阻，正在切换备用通道 (${ep.name})...`,
-        }));
-
-        try {
-          const resp = await fetch(ep.url, {
-            signal: abortController.signal,
-          });
-          if (resp.ok && resp.body) {
-            response = resp;
-            activeEndpointName = ep.name;
-            break;
-          }
-        } catch (fetchErr: any) {
-          if (fetchErr.name === "AbortError") {
-            throw fetchErr;
-          }
-          // 当前节点超时或网络异常，继续尝试下一个候选节点
-        }
-      }
-
-      if (!response || !response.body) {
-        throw new Error(
-          "直连与加速通道连接均受限（可能因防火墙阻断或网络环境限制）。建议点击下方【前往 GitHub】或【浏览器下载】直接获取安装包。"
-        );
-      }
-
-      const contentLength = response.headers.get("content-length");
-      const totalBytes = contentLength ? parseInt(contentLength, 10) : setupAsset.size || 0;
-
-      const reader = response.body?.getReader();
-      if (!reader) {
-        throw new Error("当前环境不支持流式读取");
-      }
-
-      const chunks: Uint8Array[] = [];
-      let receivedBytes = 0;
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (value) {
-          chunks.push(value);
-          receivedBytes += value.length;
-          const pct = totalBytes > 0 ? Math.min(100, (receivedBytes / totalBytes) * 100) : 0;
-          setDownloadProgress({
-            received: receivedBytes,
-            total: totalBytes,
-            percent: Math.round(pct),
-            statusText: `正在下载... (${Math.round(pct)}%) [${activeEndpointName}]`,
-          });
-        }
-      }
-
-      // 4. 组装完整二进制数组
-      setDownloadProgress((prev) => ({
-        ...prev,
-        percent: 100,
-        statusText: "下载完成，正在执行完整性校验并准备静默覆盖升级...",
-      }));
-
-      const fullData = new Uint8Array(receivedBytes);
-      let offset = 0;
-      for (const chunk of chunks) {
-        fullData.set(chunk, offset);
-        offset += chunk.length;
-      }
-
-      // 5. 触发后端命令完成 Checksum Gate 校验与静默安装拉起
-      await invoke("execute_in_place_update", {
-        data: Array.from(fullData),
+      // 3. 触发 Rust 原生流式下载与静默安装
+      await invoke("download_and_install_update", {
+        url: setupAsset.browser_download_url,
         fileName: setupAsset.name,
         expectedSha256: targetSha256,
       });
@@ -1208,14 +1142,8 @@ const MainPanel: React.FC = () => {
         statusText: "✓ 升级安装器已启动，正在原地覆盖更新并重启...",
       }));
     } catch (err: any) {
-      if (err.name === "AbortError") {
-        setDownloadError("已取消下载");
-      } else {
-        setDownloadError(`更新失败: ${err.message || err}`);
-      }
+      setDownloadError(`更新失败: ${typeof err === "string" ? err : err?.message || err}`);
       setDownloadingUpdate(false);
-    } finally {
-      downloadAbortRef.current = null;
     }
   }, [updateInfo]);
 
@@ -1998,6 +1926,11 @@ const MainPanel: React.FC = () => {
       {/* 二层紧凑高信息密度头部 (Two-Layer Compact Header - 高度 ≤ 82px)               */}
       {/* ========================================================================= */}
       <header className="panel-header-compact" onMouseDown={handleStartDrag} data-tauri-drag-region>
+        {/* 顶部中央精致极简拖拽把手 (Drag Handle Pill - 明确窗口位移心理暗示) */}
+        <div className="drag-handle-pill-container" onMouseDown={handleStartDrag} data-tauri-drag-region>
+          <div className="drag-handle-pill" title="按住拖拽移动悬浮窗口" />
+        </div>
+
         {/* Row 1: 整合搜索栏、模式切换胶囊与工具入口 (44px) */}
         <div className="header-row-1">
           <div className="search-wrapper" data-tauri-drag-region="false">

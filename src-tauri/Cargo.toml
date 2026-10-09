@@ -1,6 +1,6 @@
 [package]
 name = "clip"
-version = "1.2.6"
+version = "1.2.7"
 description = "📋 极轻量、跨平台桌面剪贴板历史管理器，基于 Tauri v2 + React + Rust 构建。"
 authors = ["Ateng"]
 edition = "2021"
@@ -29,6 +29,8 @@ thiserror = "2"
 rusqlite = { version = "0.32", features = ["bundled"] }
 pinyin = "0.10"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+futures-util = { version = "0.3", default-features = false }
 
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.58"

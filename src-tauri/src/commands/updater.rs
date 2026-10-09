@@ -5,10 +5,14 @@
 //! @author Ateng
 //! @since 2026-10-08
 
-use crate::engine::updater::{launch_silent_installer, verify_file_sha256, UpdaterError};
+use crate::engine::updater::{
+    download_with_fallback, launch_silent_installer, verify_file_sha256, UpdateProgressPayload,
+    UpdaterError,
+};
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use tauri::Emitter;
 
 /// 准备并校验临时更新安装包（纯函数接缝，供单元测试与命令层复用）
 ///
@@ -60,6 +64,8 @@ pub fn prepare_and_verify_update_file(
     Ok(target_path)
 }
 
+
+
 /// 执行原地覆盖升级命令 (In-place Upgrade)
 ///
 /// @param app_handle Tauri 应用句柄
@@ -91,6 +97,95 @@ pub async fn execute_in_place_update(
     // 3. 平滑退出当前应用，交由安装器完成原地覆写与自动拉起
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(300));
+        app_handle.exit(0);
+    });
+
+    Ok(())
+}
+
+/// 原生下载并执行原地升级命令 (Native Download & In-place Upgrade)
+///
+/// 1. 净化文件名并创建临时升级目录；
+/// 2. 构建下载候选端点（包含官方直链与多组国内备用镜像）；
+/// 3. 使用原生 reqwest 流式异步下载，实时发射 `update-download-progress` 事件给前端；
+/// 4. 下载完毕后自动执行 SHA-256 完整性强校验 (Checksum Gate)；
+/// 5. 校验通过拉起静默安装器并退出当前进程完成无感覆盖升级。
+#[tauri::command]
+pub async fn download_and_install_update(
+    app_handle: tauri::AppHandle,
+    url: String,
+    file_name: String,
+    expected_sha256: Option<String>,
+) -> Result<(), String> {
+    let temp_dir = std::env::temp_dir().join("clip_updates");
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    let safe_name = Path::new(&file_name)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("Clip-Update-Setup.exe");
+    let target_path = temp_dir.join(safe_name);
+
+    // 构建候选端点：官方直链优先（自动走系统代理），备用国内加速节点
+    let mut endpoints: Vec<(String, String)> = Vec::new();
+    endpoints.push(("GitHub 节点 (代理优先)".into(), url.clone()));
+    endpoints.push(("加速镜像通道 A (ghproxy.cn)".into(), format!("https://ghproxy.cn/{}", url)));
+    endpoints.push(("加速镜像通道 B (mirror.ghproxy.com)".into(), format!("https://mirror.ghproxy.com/{}", url)));
+    endpoints.push(("加速镜像通道 C (ghproxy.net)".into(), format!("https://ghproxy.net/{}", url)));
+
+    let app_handle_clone = app_handle.clone();
+    let hit_endpoint = download_with_fallback(&endpoints, &target_path, move |received, total, endpoint_name| {
+        let pct = if total > 0 {
+            ((received as f64 / total as f64) * 100.0).min(100.0)
+        } else {
+            0.0
+        };
+        let _ = app_handle_clone.emit(
+            "update-download-progress",
+            UpdateProgressPayload {
+                received_bytes: received,
+                total_bytes: total,
+                percentage: pct,
+                status: format!("正在下载 ({:.0}%) [{}]", pct, endpoint_name),
+            },
+        );
+    })
+    .await
+    .map_err(|e| format!("下载更新包失败: {e}"))?;
+
+    // 校验 SHA-256 (Checksum Gate)
+    if let Some(ref expected) = expected_sha256 {
+        let _ = app_handle.emit(
+            "update-download-progress",
+            UpdateProgressPayload {
+                received_bytes: 0,
+                total_bytes: 0,
+                percentage: 100.0,
+                status: "正在校验安装包完整性...".into(),
+            },
+        );
+        if let Err(err) = verify_file_sha256(&target_path, expected) {
+            let _ = std::fs::remove_file(&target_path);
+            return Err(format!("安装包 SHA-256 校验未通过: {err}"));
+        }
+    }
+
+    let _ = app_handle.emit(
+        "update-download-progress",
+        UpdateProgressPayload {
+            received_bytes: 0,
+            total_bytes: 0,
+            percentage: 100.0,
+            status: format!("下载与校验完成 (节点: {})，正在启动覆盖安装...", hit_endpoint),
+        },
+    );
+
+    // 触发静默安装器
+    launch_silent_installer(&target_path).map_err(|e| format!("启动静默升级安装器失败: {e}"))?;
+
+    // 平滑退出当前应用，交由安装器完成原地覆写与自动拉起
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(500));
         app_handle.exit(0);
     });
 
