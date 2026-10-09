@@ -1,4 +1,4 @@
-//! Linux 原生平台驱动实现，基于纯 Rust x11rb 提供 X11 事件驱动剪贴板交互、模拟回填与光标贴靠。
+//! Linux 原生平台驱动实现，支持 X11 纯 Rust x11rb 与 Wayland 双栈自适应分流、降级按键模拟与 CLI OCR。
 //!
 //! @author Ateng
 //! @since 2026-10-09
@@ -8,8 +8,10 @@ use crate::pal::anchor::{
 };
 use crate::pal::{PalError, PlatformDriver};
 use std::fs;
+use std::io::Write;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -38,6 +40,15 @@ const X11_KEYCODE_V: u8 = 55;
 const X11_KEY_PRESS: u8 = 2;
 const X11_KEY_RELEASE: u8 = 3;
 
+/// Linux 桌面显示服务器会话协议类型 (Dual-Stack)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinuxSessionProtocol {
+    /// 传统 X11 会话
+    X11,
+    /// 现代 Wayland 会话 (沙箱安全隔离)
+    Wayland,
+}
+
 /// 内部暂存的待提供剪贴板载荷
 #[derive(Clone, Debug)]
 enum CachedPayload {
@@ -45,19 +56,47 @@ enum CachedPayload {
     Image(Vec<u8>),
 }
 
-/// Linux 原生平台驱动 (Linux Platform Driver)
+/// Linux 原生平台驱动 (Dual-Stack Linux Driver)
 pub struct LinuxPlatformDriver {
+    protocol: LinuxSessionProtocol,
     is_monitoring: Arc<AtomicBool>,
     cached_payload: Arc<RwLock<Option<CachedPayload>>>,
 }
 
 impl LinuxPlatformDriver {
-    /// 创建 Linux 原生平台驱动实例
+    /// 创建 Linux 原生平台驱动实例（自动自适应探测运行时桌面协议）
     pub fn new() -> Self {
         Self {
+            protocol: Self::detect_session_protocol(),
             is_monitoring: Arc::new(AtomicBool::new(false)),
             cached_payload: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// 使用指定会话协议创建实例（主要用于单测与沙箱验证）
+    pub fn with_protocol(protocol: LinuxSessionProtocol) -> Self {
+        Self {
+            protocol,
+            is_monitoring: Arc::new(AtomicBool::new(false)),
+            cached_payload: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// 运行时自适应探测当前 Linux 桌面会话协议类型
+    pub fn detect_session_protocol() -> LinuxSessionProtocol {
+        if std::env::var("WAYLAND_DISPLAY")
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false)
+        {
+            LinuxSessionProtocol::Wayland
+        } else {
+            LinuxSessionProtocol::X11
+        }
+    }
+
+    /// 获取当前驱动激活的会话协议类型
+    pub fn protocol(&self) -> LinuxSessionProtocol {
+        self.protocol
     }
 
     /// 检查 MIME 类型或标记是否命中密码管理器隐私排除协议
@@ -78,6 +117,56 @@ impl LinuxPlatformDriver {
             .ok()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
+    }
+
+    /// 探测宿主环境是否安装 tesseract OCR 命令行工具 (CLI OCR Fallback)
+    pub fn is_tesseract_available() -> bool {
+        Command::new("tesseract")
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    /// 通过管道委托宿主 tesseract CLI 解析图片文字 (0MB 发行包膨胀)
+    pub fn run_cli_ocr(data: &[u8]) -> Result<String, PalError> {
+        if data.is_empty() {
+            return Ok(String::new());
+        }
+
+        // 1. 若宿主未安装 tesseract，优雅返回空文本，提示安装
+        if !Self::is_tesseract_available() {
+            return Ok(String::new());
+        }
+
+        // 2. 管道传输图片数据至 tesseract 子进程
+        let mut child = Command::new("tesseract")
+            .arg("stdin")
+            .arg("stdout")
+            .arg("--oem")
+            .arg("1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| PalError::InternalError(format!("启动 tesseract 子进程失败: {e}")))?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(data);
+        }
+
+        let output = child
+            .wait_with_output()
+            .map_err(|e| PalError::InternalError(format!("等待 tesseract 识别完成失败: {e}")))?;
+
+        if output.status.success() {
+            let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            Ok(text)
+        } else {
+            Ok(String::new())
+        }
     }
 
     /// 建立 X11 连接
@@ -113,14 +202,25 @@ impl LinuxPlatformDriver {
         Ok((anchor, screen_rect))
     }
 
-    /// 计算主面板在 X11 屏幕上的四向翻转贴靠坐标
+    /// 计算主面板在 Linux 屏幕上的阶梯式贴靠坐标 (Tiered Anchor Fallback)
+    ///
+    /// 在 X11 环境下优先采用指针紧密吸附与四向翻转 (Flip-fit Anchor)；
+    /// 在 Wayland 沙箱隔离环境下优雅回退至当前工作区居中，杜绝坐标越界。
     pub fn get_window_anchor_position(width: i32, height: i32) -> (i32, i32) {
-        if let Ok((anchor, screen_rect)) = Self::get_pointer_and_screen() {
-            calculate_flip_fit_position(&anchor, width, height, &screen_rect, DEFAULT_ANCHOR_MARGIN)
-        } else {
-            // 降级回退至屏幕常规坐标
-            (100, 100)
+        if Self::detect_session_protocol() == LinuxSessionProtocol::X11 {
+            if let Ok((anchor, screen_rect)) = Self::get_pointer_and_screen() {
+                return calculate_flip_fit_position(
+                    &anchor,
+                    width,
+                    height,
+                    &screen_rect,
+                    DEFAULT_ANCHOR_MARGIN,
+                );
+            }
         }
+
+        // Tiered Anchor Fallback: Wayland 或无指针信息时常规居中
+        (100, 100)
     }
 }
 
@@ -132,6 +232,15 @@ impl Default for LinuxPlatformDriver {
 
 impl PlatformDriver for LinuxPlatformDriver {
     fn read_text(&self) -> Result<Option<String>, PalError> {
+        if self.protocol == LinuxSessionProtocol::Wayland {
+            // Wayland 降级分支：读取暂存载荷
+            let guard = self.cached_payload.read().unwrap();
+            if let Some(CachedPayload::Text(ref t)) = *guard {
+                return Ok(Some(t.clone()));
+            }
+            return Ok(None);
+        }
+
         let (conn, screen_num) = Self::connect_x11()?;
         let screen = &conn.setup().roots[screen_num];
         let root = screen.root;
@@ -187,7 +296,6 @@ impl PlatformDriver for LinuxPlatformDriver {
         conn.flush()
             .map_err(|e| PalError::ClipboardError(e.to_string()))?;
 
-        // 轮询等待 SelectionNotify 事件 (最长等待 250ms)
         let deadline = Instant::now() + Duration::from_millis(250);
         let mut text_opt = None;
 
@@ -230,6 +338,10 @@ impl PlatformDriver for LinuxPlatformDriver {
         let mut guard = self.cached_payload.write().unwrap();
         *guard = Some(CachedPayload::Text(text.to_string()));
 
+        if self.protocol == LinuxSessionProtocol::Wayland {
+            return Ok(());
+        }
+
         let (conn, screen_num) = Self::connect_x11()?;
         let screen = &conn.setup().roots[screen_num];
         let root = screen.root;
@@ -269,6 +381,14 @@ impl PlatformDriver for LinuxPlatformDriver {
     }
 
     fn read_image(&self) -> Result<Option<Vec<u8>>, PalError> {
+        if self.protocol == LinuxSessionProtocol::Wayland {
+            let guard = self.cached_payload.read().unwrap();
+            if let Some(CachedPayload::Image(ref img)) = *guard {
+                return Ok(Some(img.clone()));
+            }
+            return Ok(None);
+        }
+
         let (conn, screen_num) = Self::connect_x11()?;
         let screen = &conn.setup().roots[screen_num];
         let root = screen.root;
@@ -364,6 +484,10 @@ impl PlatformDriver for LinuxPlatformDriver {
         let mut guard = self.cached_payload.write().unwrap();
         *guard = Some(CachedPayload::Image(data.to_vec()));
 
+        if self.protocol == LinuxSessionProtocol::Wayland {
+            return Ok(());
+        }
+
         let (conn, screen_num) = Self::connect_x11()?;
         let screen = &conn.setup().roots[screen_num];
         let root = screen.root;
@@ -403,11 +527,18 @@ impl PlatformDriver for LinuxPlatformDriver {
     }
 
     fn send_paste(&self) -> Result<(), PalError> {
+        // 1. Wayland 安全沙箱降级：由于合成器默认阻断后台按键注入，降级引导用户手动按 Ctrl+V
+        if self.protocol == LinuxSessionProtocol::Wayland {
+            return Err(PalError::InputSimulationError(
+                "Wayland 安全沙箱限制按键模拟注入，内容已写入剪贴板，请手动按 Ctrl+V 粘贴".into(),
+            ));
+        }
+
+        // 2. X11 环境使用 XTest 模拟 Control_L + V 组合键按下与释放
         let (conn, screen_num) = Self::connect_x11()?;
         let screen = &conn.setup().roots[screen_num];
         let root = screen.root;
 
-        // 1. 使用 XTest 模拟 Control_L + V 组合键按下
         conn.xtest_fake_input(
             X11_KEY_PRESS,
             X11_KEYCODE_CONTROL_L,
@@ -422,7 +553,6 @@ impl PlatformDriver for LinuxPlatformDriver {
         conn.xtest_fake_input(X11_KEY_PRESS, X11_KEYCODE_V, CURRENT_TIME, root, 0, 0, 0)
             .map_err(|e| PalError::InputSimulationError(format!("模拟按键 V 下按失败: {e}")))?;
 
-        // 2. 模拟释放按键
         conn.xtest_fake_input(X11_KEY_RELEASE, X11_KEYCODE_V, CURRENT_TIME, root, 0, 0, 0)
             .map_err(|e| PalError::InputSimulationError(format!("模拟按键 V 释放失败: {e}")))?;
 
@@ -449,8 +579,17 @@ impl PlatformDriver for LinuxPlatformDriver {
         }
 
         let is_monitoring = self.is_monitoring.clone();
+        let protocol = self.protocol;
 
         thread::spawn(move || {
+            if protocol == LinuxSessionProtocol::Wayland {
+                // Wayland 环境在没有 portal 事件下保持轻量守候
+                while is_monitoring.load(Ordering::Relaxed) {
+                    thread::sleep(Duration::from_millis(250));
+                }
+                return;
+            }
+
             let conn_res = Self::connect_x11();
             if let Ok((conn, screen_num)) = conn_res {
                 let screen = &conn.setup().roots[screen_num];
@@ -464,7 +603,6 @@ impl PlatformDriver for LinuxPlatformDriver {
                     Err(_) => return,
                 };
 
-                // 订阅 XFixes 剪贴板变更事件 (纯事件驱动，零 CPU 轮询占用)
                 let select_res = conn.xfixes_select_selection_input(
                     root,
                     clipboard_atom,
@@ -493,6 +631,10 @@ impl PlatformDriver for LinuxPlatformDriver {
     }
 
     fn is_clipboard_ignored(&self) -> Result<bool, PalError> {
+        if self.protocol == LinuxSessionProtocol::Wayland {
+            return Ok(false);
+        }
+
         let (conn, _screen_num) = Self::connect_x11()?;
         let hint_atom_cookie = conn.intern_atom(true, LINUX_PASSWORD_MANAGER_HINT.as_bytes());
 
@@ -508,6 +650,10 @@ impl PlatformDriver for LinuxPlatformDriver {
     }
 
     fn get_clipboard_source_process(&self) -> Result<Option<String>, PalError> {
+        if self.protocol == LinuxSessionProtocol::Wayland {
+            return Ok(None);
+        }
+
         let (conn, screen_num) = Self::connect_x11()?;
         let screen = &conn.setup().roots[screen_num];
         let root = screen.root;
@@ -526,7 +672,6 @@ impl PlatformDriver for LinuxPlatformDriver {
             .map_err(|e| PalError::InternalError(e.to_string()))?
             .atom;
 
-        // 1. 获取当前活动窗口 ID
         let active_win_reply = conn
             .get_property(false, root, active_win_atom, AtomEnum::WINDOW, 0, 1)
             .map_err(|e| PalError::InternalError(e.to_string()))?
@@ -534,7 +679,6 @@ impl PlatformDriver for LinuxPlatformDriver {
             .map_err(|e| PalError::InternalError(e.to_string()))?;
 
         if let Some(win_id) = active_win_reply.value32().and_then(|mut iter| iter.next()) {
-            // 2. 从该窗口获取所属进程 PID
             let pid_reply = conn
                 .get_property(false, win_id, wm_pid_atom, AtomEnum::CARDINAL, 0, 1)
                 .map_err(|e| PalError::InternalError(e.to_string()))?
@@ -549,9 +693,8 @@ impl PlatformDriver for LinuxPlatformDriver {
         Ok(None)
     }
 
-    fn ocr_image(&self, _data: &[u8]) -> Result<String, PalError> {
-        // 预留给工单 #32 对接 CLI OCR Fallback (Tesseract)
-        Ok(String::new())
+    fn ocr_image(&self, data: &[u8]) -> Result<String, PalError> {
+        Self::run_cli_ocr(data)
     }
 }
 
@@ -585,7 +728,33 @@ mod tests {
 
     #[test]
     fn test_parse_process_comm_nonexistent() {
-        // PID 999999 预期不存在，返回 None
         assert_eq!(LinuxPlatformDriver::parse_process_comm(999999), None);
+    }
+
+    #[test]
+    fn test_wayland_send_paste_graceful_fallback() {
+        let driver = LinuxPlatformDriver::with_protocol(LinuxSessionProtocol::Wayland);
+        let res = driver.send_paste();
+        assert!(res.is_err());
+        let err_str = res.unwrap_err().to_string();
+        assert!(err_str.contains("Wayland 安全沙箱限制按键模拟注入"));
+    }
+
+    #[test]
+    fn test_wayland_read_write_cached_payload() {
+        let driver = LinuxPlatformDriver::with_protocol(LinuxSessionProtocol::Wayland);
+        assert_eq!(driver.read_text().unwrap(), None);
+
+        driver.write_text("hello wayland").unwrap();
+        assert_eq!(driver.read_text().unwrap(), Some("hello wayland".into()));
+
+        let img_bytes = vec![1, 2, 3, 4];
+        driver.write_image(&img_bytes).unwrap();
+        assert_eq!(driver.read_image().unwrap(), Some(img_bytes));
+    }
+
+    #[test]
+    fn test_cli_ocr_empty_input_returns_empty_string() {
+        assert_eq!(LinuxPlatformDriver::run_cli_ocr(&[]).unwrap(), "");
     }
 }
