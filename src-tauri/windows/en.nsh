@@ -36,7 +36,7 @@ LangString webview2InstallSuccess ${LANG_ENGLISH} "Successfully installed WebVie
 
 ; 4. Clip Custom Light Wizard Page Text
 LangString launchClipNow ${LANG_ENGLISH} "Launch Clip now (Recommended)"
-LangString finishPageDescription ${LANG_ENGLISH} "${PRODUCTNAME} has been successfully installed on your computer!$\r$\n$\r$\n• Toggle Panel: Press Alt + V anytime to show or hide$\r$\n• Tray Daemon: Silently guards in system tray when closed$\r$\n• Instant Paste: Use 1~8 keys for instant pasting"
+LangString finishPageDescription ${LANG_ENGLISH} "${PRODUCTNAME} has been successfully installed on your computer!$\r$\n$\r$\n• Toggle Panel: Press Alt + V anytime to show or hide$\r$\n• Tray Daemon: Silently guards in system tray when closed$\r$\n• Instant Paste: Use 1~9 keys for instant pasting"
 LangString dirPageTopText ${LANG_ENGLISH} "Setup will install ${PRODUCTNAME} into the current user directory without requiring elevation."
 LangString dirPageDestText ${LANG_ENGLISH} "Destination Folder (Current User - No Elevation Required)"
 LangString uninstPageTopText ${LANG_ENGLISH} "Setup will uninstall ${PRODUCTNAME} from your computer."

@@ -20,7 +20,7 @@ import "./App.css";
 /**
  * 当前客户端编译版本号 (SemVer)
  */
-export const CURRENT_VERSION = "v1.2.5";
+export const CURRENT_VERSION = "v1.2.6";
 
 /**
  * 存储状态与磁盘占用摘要信息契约 (遵循 Issue #19)
@@ -469,6 +469,12 @@ const MainPanel: React.FC = () => {
   const [downloadError, setDownloadError] = useState<string | null>(null);
   const downloadAbortRef = useRef<AbortController | null>(null);
 
+  // 是否存在可用新版本 (Update Beacon)
+  const hasNewVersion = useMemo(() => {
+    if (!updateInfo) return false;
+    return compareSemVer(CURRENT_VERSION, updateInfo.tag_name) > 0;
+  }, [updateInfo]);
+
   // 待提交物理删除与 3 秒撤销网 (Entry Deletion & Safety Net)
   const [pendingDelete, setPendingDelete] = useState<{ items: DisplayItem[]; timerId: ReturnType<typeof setTimeout> } | null>(null);
   const [undoToast, setUndoToast] = useState<{ text: string; showUndo: boolean } | null>(null);
@@ -710,6 +716,46 @@ const MainPanel: React.FC = () => {
     setSelectedIds((prev) =>
       prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]
     );
+  }, []);
+
+  /**
+   * 范围连选条目 (Shift + 点击)
+   */
+  const handleRangeSelectItem = useCallback((targetIndex: number, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    const start = Math.min(selectedIndex, targetIndex);
+    const end = Math.max(selectedIndex, targetIndex);
+    const rangeIds = displayItems.slice(start, end + 1).map((item) => item.id);
+    setSelectedIds((prev) => {
+      const set = new Set(prev);
+      rangeIds.forEach((id) => set.add(id));
+      return Array.from(set);
+    });
+  }, [selectedIndex, displayItems]);
+
+  /**
+   * 按住空白区域平滑拖动无边框窗口 (Window Dragging)
+   */
+  const handleStartDrag = useCallback((e: React.MouseEvent) => {
+    if (e.button === 0) {
+      const target = e.target as HTMLElement;
+      if (
+        target.tagName === "INPUT" ||
+        target.tagName === "BUTTON" ||
+        target.tagName === "A" ||
+        target.closest("button") ||
+        target.closest("input") ||
+        target.closest(".search-wrapper") ||
+        target.closest(".item-card") ||
+        target.closest(".panel-item") ||
+        target.closest(".segmented-pill") ||
+        target.closest(".modal-card") ||
+        target.closest(".multi-select-toolbar")
+      ) {
+        return;
+      }
+      getCurrentWebviewWindow().startDragging();
+    }
   }, []);
 
   /**
@@ -969,7 +1015,9 @@ const MainPanel: React.FC = () => {
         setUpdateInfo(data);
         setDownloadingUpdate(false);
         setDownloadError(null);
-        setUpdateModalOpen(true);
+        if (isManual) {
+          setUpdateModalOpen(true);
+        }
       } else {
         if (isManual) {
           setUpdateFeedback({
@@ -1607,7 +1655,13 @@ const MainPanel: React.FC = () => {
       }
     });
 
+    // 启动延迟 3 秒发起后台静默检查更新 (Update Beacon)
+    const updateTimer = setTimeout(() => {
+      handleCheckUpdate(false);
+    }, 3000);
+
     return () => {
+      clearTimeout(updateTimer);
       unlistenClipboard.then((f) => f());
       unlistenQueue.then((f) => f());
       unlistenIncognito.then((f) => f());
@@ -1616,7 +1670,7 @@ const MainPanel: React.FC = () => {
       unlistenShortcutChanged.then((f) => f());
       unlistenFocus.then((f) => f());
     };
-  }, [loadData, handleClose]);
+  }, [loadData, handleClose, handleCheckUpdate]);
 
   // 全局键盘导航流闭环 (Issue #15)
   useEffect(() => {
@@ -1943,7 +1997,7 @@ const MainPanel: React.FC = () => {
       {/* ========================================================================= */}
       {/* 二层紧凑高信息密度头部 (Two-Layer Compact Header - 高度 ≤ 82px)               */}
       {/* ========================================================================= */}
-      <header className="panel-header-compact" data-tauri-drag-region>
+      <header className="panel-header-compact" onMouseDown={handleStartDrag} data-tauri-drag-region>
         {/* Row 1: 整合搜索栏、模式切换胶囊与工具入口 (44px) */}
         <div className="header-row-1">
           <div className="search-wrapper" data-tauri-drag-region="false">
@@ -1956,8 +2010,8 @@ const MainPanel: React.FC = () => {
               onChange={handleQueryChange}
               placeholder={
                 activeTab === "snippets"
-                  ? "搜索常用短语 (点击或按 / 输入)..."
-                  : "搜索剪贴板历史 (点击或按 / 输入，直接按 1~9 秒贴)..."
+                  ? "搜索常用短语 (/ 聚焦)..."
+                  : "搜索历史 (/ 聚焦，1~9 直贴)..."
               }
             />
             {query && (
@@ -2023,18 +2077,19 @@ const MainPanel: React.FC = () => {
               <span>{isPinned ? "已固定" : "固定"}</span>
             </button>
 
-            {/* 设置按钮 */}
+            {/* 设置按钮 (带版本更新指示红点) */}
             <button
-              className="header-action-btn"
+              className={`header-action-btn settings-btn ${hasNewVersion ? "has-update" : ""}`}
               onClick={() => {
                 setSettingsModalOpen(true);
                 setDrawerOpen(false);
                 setBackupMsg(null);
                 setShortcutFeedback(null);
               }}
-              title="系统设置与快捷键管理"
+              title={hasNewVersion ? `发现新版本 ${updateInfo?.tag_name} (点击查看)` : "系统设置与快捷键管理"}
             >
               <span>⚙️</span>
+              {hasNewVersion && <span className="update-dot" />}
             </button>
           </div>
         </div>
@@ -2087,9 +2142,22 @@ const MainPanel: React.FC = () => {
           )}
 
           <div className="header-stats-label">
-            <span>共 {displayItems.length} 条</span>
-            <span className="stats-divider">•</span>
-            <span>按 1~8 快捷回填</span>
+            {hasNewVersion ? (
+              <button
+                className="update-beacon-pill"
+                onClick={() => setUpdateModalOpen(true)}
+                title="发现新版本，点击查看更新日志并一键覆盖安装"
+              >
+                <span className="beacon-icon">🚀</span>
+                <span className="beacon-text">新版 {updateInfo?.tag_name}</span>
+              </button>
+            ) : (
+              <>
+                <span>共 {displayItems.length} 条</span>
+                <span className="stats-divider">•</span>
+                <span>按 1~9 快捷直贴</span>
+              </>
+            )}
           </div>
         </div>
       </header>
@@ -2172,8 +2240,10 @@ const MainPanel: React.FC = () => {
                     isItemMultiSelected ? "multi-selected" : ""
                   }`}
                   onClick={(e) => {
-                    if (e.ctrlKey || e.metaKey || e.shiftKey) {
+                    if (e.ctrlKey || e.metaKey) {
                       handleToggleSelectItem(item.id, e);
+                    } else if (e.shiftKey) {
+                      handleRangeSelectItem(index, e);
                     } else if (selectedIds.length > 0) {
                       handleToggleSelectItem(item.id, e);
                     } else {
@@ -2192,16 +2262,19 @@ const MainPanel: React.FC = () => {
                       <span className="item-keycap dot">•</span>
                     )}
 
-                    {/* 多选复选框 */}
-                    {selectedIds.length > 0 && (
-                      <div
-                        className={`item-checkbox ${isItemMultiSelected ? "checked" : ""}`}
-                        onClick={(e) => handleToggleSelectItem(item.id, e)}
-                        title="勾选此项参与多选合并粘贴"
-                      >
-                        {isItemMultiSelected ? "✓" : ""}
-                      </div>
-                    )}
+                    {/* 多选复选框 (悬浮或已选时显现，点击直接勾选参与批量操作) */}
+                    <div
+                      className={`item-checkbox ${isItemMultiSelected ? "checked" : ""} ${
+                        selectedIds.length > 0 ? "in-multi-mode" : ""
+                      }`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleToggleSelectItem(item.id, e);
+                      }}
+                      title="勾选此项参与多选批量操作"
+                    >
+                      {isItemMultiSelected ? "✓" : ""}
+                    </div>
 
                     {/* 2. 绝对固定 28×28 槽位 */}
                     <div className={`item-slot ${slotClass}`}>{slotIcon}</div>
@@ -2537,7 +2610,7 @@ const MainPanel: React.FC = () => {
       {/* ========================================================================= */}
       {/* 底部状态栏 (Bottom Status Bar - 34px)                                       */}
       {/* ========================================================================= */}
-      <footer className="panel-footer-bar">
+      <footer className="panel-footer-bar" onMouseDown={handleStartDrag}>
         <div className="footer-left">
           <span className="status-dot" />
           <span style={{ fontWeight: 500 }}>
@@ -2579,13 +2652,13 @@ const MainPanel: React.FC = () => {
       </footer>
 
       {/* ========================================================================= */}
-      {/* 多选合并回填浮动工具栏                                                     */}
+      {/* 多选合并回填与批量删除浮动工具栏                                           */}
       {/* ========================================================================= */}
-      {selectedIds.length > 1 && (
+      {selectedIds.length > 0 && (
         <div className="multi-select-toolbar">
           <div className="multi-select-info">
             <span className="multi-select-badge">{selectedIds.length}</span>
-            <span>已选 {selectedIds.length} 项 (按 Enter 换行合并粘贴，Esc 取消)</span>
+            <span>已选 {selectedIds.length} 项 (Delete 删除，Enter 粘贴，Esc 取消)</span>
           </div>
           <div className="multi-select-actions">
             <button
@@ -2596,12 +2669,12 @@ const MainPanel: React.FC = () => {
               }}
               title="批量删除所选条目 (Delete)"
             >
-              🗑️ 批量删除
+              🗑️ 批量删除 ({selectedIds.length})
             </button>
-            <button className="multi-btn primary" onClick={() => handlePasteMultiple(selectedIds)}>
-              ↵ 换行合并粘贴
+            <button className="multi-btn primary" onClick={() => handlePasteMultiple(selectedIds)} title="合并粘贴到前台窗口 (Enter)">
+              ↵ 合并粘贴
             </button>
-            <button className="multi-btn" onClick={() => setSelectedIds([])}>
+            <button className="multi-btn" onClick={() => setSelectedIds([])} title="取消选择 (Esc)">
               取消
             </button>
           </div>
@@ -2650,7 +2723,7 @@ const MainPanel: React.FC = () => {
             </div>
             <div className="palette-footer">
               <span>
-                <kbd>↵</kbd> / <kbd>1~8</kbd> 执行并回填
+                <kbd>↵</kbd> / <kbd>{(selectedItem.kind === "image" ? IMAGE_ACTIONS : TRANSFORM_ACTIONS).length > 1 ? `1~${(selectedItem.kind === "image" ? IMAGE_ACTIONS : TRANSFORM_ACTIONS).length}` : "1"}</kbd> 执行并回填
               </span>
               <span>
                 <kbd>Esc</kbd> 取消返回

@@ -36,7 +36,7 @@ LangString webview2InstallSuccess ${LANG_SIMPCHINESE} "成功安装 WebView2"
 
 ; 4. Clip 定制浅色向导页面文案
 LangString launchClipNow ${LANG_SIMPCHINESE} "立即运行 Clip (推荐)"
-LangString finishPageDescription ${LANG_SIMPCHINESE} "${PRODUCTNAME} 已成功安装到您的计算机！$\r$\n$\r$\n• 唤出面板：随时按下 Alt + V 快速调出或隐藏$\r$\n• 后台守护：关闭后常驻系统托盘，静默零打扰$\r$\n• 极速粘贴：支持 1~8 数字键直接回填"
+LangString finishPageDescription ${LANG_SIMPCHINESE} "${PRODUCTNAME} 已成功安装到您的计算机！$\r$\n$\r$\n• 唤出面板：随时按下 Alt + V 快速调出或隐藏$\r$\n• 后台守护：关闭后常驻系统托盘，静默零打扰$\r$\n• 极速粘贴：支持 1~9 数字键直接回填"
 LangString dirPageTopText ${LANG_SIMPCHINESE} "安装程序将把 ${PRODUCTNAME} 安装至当前用户免提权安全目录。"
 LangString dirPageDestText ${LANG_SIMPCHINESE} "目标文件夹 (当前用户免管理员权限)"
 LangString uninstPageTopText ${LANG_SIMPCHINESE} "安装向导即将从计算机中卸载 ${PRODUCTNAME}。"
