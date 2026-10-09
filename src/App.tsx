@@ -20,7 +20,7 @@ import "./App.css";
 /**
  * 当前客户端编译版本号 (SemVer)
  */
-export const CURRENT_VERSION = "v1.2.8";
+export const CURRENT_VERSION = "v1.2.9";
 
 /**
  * 存储状态与磁盘占用摘要信息契约 (遵循 Issue #19)
@@ -517,6 +517,10 @@ const MainPanel: React.FC = () => {
     autoHideOnBlurRef.current = autoHideOnBlur;
   }, [autoHideOnBlur]);
 
+  // 窗口拖动中状态守护（防止未钉住时拖动引发失焦闪退）
+  const isDraggingRef = useRef<boolean>(false);
+  const dragResetTimerRef = useRef<number | null>(null);
+
   const activeTabRef = useRef(activeTab);
   useEffect(() => {
     activeTabRef.current = activeTab;
@@ -754,8 +758,31 @@ const MainPanel: React.FC = () => {
       ) {
         return;
       }
+      if (dragResetTimerRef.current !== null) {
+        window.clearTimeout(dragResetTimerRef.current);
+        dragResetTimerRef.current = null;
+      }
+      isDraggingRef.current = true;
       getCurrentWebviewWindow().startDragging();
     }
+  }, []);
+
+  // 释放鼠标拖拽后延迟重置拖动标记，彻底抵御 Windows 释放焦点微抖动
+  useEffect(() => {
+    const handleGlobalMouseUp = () => {
+      if (isDraggingRef.current) {
+        dragResetTimerRef.current = window.setTimeout(() => {
+          isDraggingRef.current = false;
+        }, 300);
+      }
+    };
+    window.addEventListener("mouseup", handleGlobalMouseUp);
+    return () => {
+      window.removeEventListener("mouseup", handleGlobalMouseUp);
+      if (dragResetTimerRef.current !== null) {
+        window.clearTimeout(dragResetTimerRef.current);
+      }
+    };
   }, []);
 
   /**
@@ -1570,7 +1597,7 @@ const MainPanel: React.FC = () => {
     const appWin = getCurrentWebviewWindow();
     const unlistenFocus = appWin.onFocusChanged(({ payload: focused }) => {
       if (!focused) {
-        if (isPinnedRef.current || !autoHideOnBlurRef.current) {
+        if (isPinnedRef.current || !autoHideOnBlurRef.current || isDraggingRef.current) {
           return;
         }
         handleClose();

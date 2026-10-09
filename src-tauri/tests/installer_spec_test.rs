@@ -97,6 +97,14 @@ fn test_tauri_conf_nsis_spec() {
     assert!(hooks_content.contains("MUI_DIRECTORYPAGE_TEXT_DESTINATION"), "必须配置 MUI_DIRECTORYPAGE_TEXT_DESTINATION");
     assert!(hooks_content.contains("MUI_UNCONFIRMPAGE_TEXT_TOP"), "必须配置 MUI_UNCONFIRMPAGE_TEXT_TOP");
 
+    // 5.1 验证自定义模板 windows/installer.nsi 配置与覆盖更新跳过逻辑
+    let template_file = nsis["template"].as_str().unwrap_or_default();
+    assert_eq!(template_file, "windows/installer.nsi", "template 必须配置为 windows/installer.nsi");
+    let template_path = Path::new(template_file);
+    assert!(template_path.exists(), "windows/installer.nsi 文件必须存在: {:?}", template_path);
+    let template_content = fs::read_to_string(template_path).unwrap();
+    assert!(template_content.contains("Page custom PageReinstall"), "模板必须包含 PageReinstall 逻辑");
+
     // 6. 验证自定义双语文件 customLanguageFiles
     let custom_langs = &nsis["customLanguageFiles"];
     assert!(custom_langs.is_object(), "必须配置 customLanguageFiles");

@@ -157,7 +157,7 @@ pub fn launch_silent_installer(installer_path: &Path) -> Result<(), UpdaterError
             .output();
 
         let mut cmd = std::process::Command::new(installer_path);
-        cmd.arg("/S");
+        cmd.args(["/UPDATE", "/S"]);
         cmd.creation_flags(CREATE_NO_WINDOW);
 
         cmd.spawn()
