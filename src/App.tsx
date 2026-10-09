@@ -20,7 +20,7 @@ import "./App.css";
 /**
  * 当前客户端编译版本号 (SemVer)
  */
-export const CURRENT_VERSION = "v1.2.7";
+export const CURRENT_VERSION = "v1.2.8";
 
 /**
  * 存储状态与磁盘占用摘要信息契约 (遵循 Issue #19)
@@ -48,10 +48,10 @@ export interface GitHubReleaseAsset {
  */
 export interface GitHubReleaseInfo {
   tag_name: string;
-  name: string;
-  body: string;
-  published_at: string;
-  html_url: string;
+  name?: string | null;
+  body?: string | null;
+  published_at?: string | null;
+  html_url?: string | null;
   assets?: GitHubReleaseAsset[];
 }
 
@@ -997,19 +997,13 @@ const MainPanel: React.FC = () => {
   }, []);
 
   /**
-   * 检查在线 GitHub 发布版本
+   * 检查在线 GitHub 发布版本（基于后端双通道免配额架构，免疫 403 Rate Limit）
    */
   const handleCheckUpdate = useCallback(async (isManual = true) => {
     setUpdateChecking(true);
     setUpdateFeedback(null);
     try {
-      const resp = await fetch("https://api.github.com/repos/atengk/clip/releases/latest", {
-        headers: { Accept: "application/vnd.github.v3+json" },
-      });
-      if (!resp.ok) {
-        throw new Error(`无法获取更新信息 (HTTP ${resp.status})`);
-      }
-      const data: GitHubReleaseInfo = await resp.json();
+      const data = await invoke<GitHubReleaseInfo>("check_for_updates");
       const hasNew = compareSemVer(CURRENT_VERSION, data.tag_name) > 0;
       if (hasNew) {
         setUpdateInfo(data);
@@ -1030,7 +1024,7 @@ const MainPanel: React.FC = () => {
       if (isManual) {
         setUpdateFeedback({
           type: "error",
-          text: `检查更新失败: ${err.message || err}`,
+          text: `${typeof err === "string" ? err : err?.message || err}`,
         });
       }
     } finally {
@@ -1928,7 +1922,7 @@ const MainPanel: React.FC = () => {
       <header className="panel-header-compact" onMouseDown={handleStartDrag} data-tauri-drag-region>
         {/* 顶部中央精致极简拖拽把手 (Drag Handle Pill - 明确窗口位移心理暗示) */}
         <div className="drag-handle-pill-container" onMouseDown={handleStartDrag} data-tauri-drag-region>
-          <div className="drag-handle-pill" title="按住拖拽移动悬浮窗口" />
+          <div className="drag-handle-pill" title="按住拖拽移动悬浮窗口" data-tauri-drag-region />
         </div>
 
         {/* Row 1: 整合搜索栏、模式切换胶囊与工具入口 (44px) */}
@@ -2543,7 +2537,7 @@ const MainPanel: React.FC = () => {
       {/* ========================================================================= */}
       {/* 底部状态栏 (Bottom Status Bar - 34px)                                       */}
       {/* ========================================================================= */}
-      <footer className="panel-footer-bar" onMouseDown={handleStartDrag}>
+      <footer className="panel-footer-bar" onMouseDown={handleStartDrag} data-tauri-drag-region>
         <div className="footer-left">
           <span className="status-dot" />
           <span style={{ fontWeight: 500 }}>

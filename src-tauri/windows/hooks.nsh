@@ -26,8 +26,8 @@
   ; 3. 纯覆盖就地升级模式 (Pure In-Place Overwrite Mode):
   ; 临时移除旧版本的 UninstallString 键值，彻底屏蔽安装器对旧版卸载向导 (Uninstall.exe) 的链式调用
   ; 实现极速就地二进制直接覆盖，绝不走任何卸载流程，100% 保障用户数据与极速无感体验
-  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Clip" "UninstallString"
-  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\com.clip.app" "UninstallString"
+  DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Clip"
+  DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\com.clip.app"
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL

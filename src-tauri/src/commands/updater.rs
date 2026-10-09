@@ -6,8 +6,8 @@
 //! @since 2026-10-08
 
 use crate::engine::updater::{
-    download_with_fallback, launch_silent_installer, verify_file_sha256, UpdateProgressPayload,
-    UpdaterError,
+    check_latest_release, download_with_fallback, launch_silent_installer, verify_file_sha256,
+    RemoteReleaseInfo, UpdateProgressPayload, UpdaterError,
 };
 use std::fs::File;
 use std::io::Write;
@@ -190,6 +190,17 @@ pub async fn download_and_install_update(
     });
 
     Ok(())
+}
+
+/// 检查在线发布版本 IPC 命令
+///
+/// 优先请求 GitHub REST API，当触发 403 频率限制时自动降级解析 Release 网页 302 重定向，
+/// 免疫无凭据请求配额耗尽异常并返回可用更新元数据。
+///
+/// @return 远端最新版本元数据模型
+#[tauri::command]
+pub async fn check_for_updates() -> Result<RemoteReleaseInfo, String> {
+    check_latest_release().await.map_err(|e| format!("检查更新失败: {e}"))
 }
 
 #[cfg(test)]

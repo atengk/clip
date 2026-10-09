@@ -18,7 +18,9 @@ use crate::commands::clipboard::{
     get_storage_info, open_storage_dir, select_backup_save_path, select_backup_open_path,
     get_history_capacity, set_history_capacity,
 };
-use crate::commands::updater::{download_and_install_update, execute_in_place_update};
+use crate::commands::updater::{
+    check_for_updates, download_and_install_update, execute_in_place_update,
+};
 use crate::commands::AppState;
 use crate::engine::ClipboardEngine;
 use crate::pal::PlatformDriver;
@@ -407,6 +409,7 @@ pub fn run() {
             select_backup_open_path,
             execute_in_place_update,
             download_and_install_update,
+            check_for_updates,
             get_history_capacity,
             set_history_capacity
         ])

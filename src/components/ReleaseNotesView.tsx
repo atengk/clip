@@ -12,7 +12,7 @@ import React, { useMemo } from "react";
 
 interface ReleaseNotesViewProps {
   /** 原始 Markdown 正文内容 */
-  body?: string;
+  body?: string | null;
 }
 
 interface NoteItem {

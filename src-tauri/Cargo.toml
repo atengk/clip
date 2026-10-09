@@ -1,6 +1,6 @@
 [package]
 name = "clip"
-version = "1.2.7"
+version = "1.2.8"
 description = "📋 极轻量、跨平台桌面剪贴板历史管理器，基于 Tauri v2 + React + Rust 构建。"
 authors = ["Ateng"]
 edition = "2021"

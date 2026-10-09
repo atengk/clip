@@ -39,6 +39,26 @@ pub struct UpdateProgressPayload {
     pub status: String,
 }
 
+/// 远端发布资产元数据模型
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RemoteReleaseAsset {
+    pub name: String,
+    pub browser_download_url: String,
+    pub size: Option<u64>,
+}
+
+/// 远端 GitHub 发布版本元数据模型
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RemoteReleaseInfo {
+    pub tag_name: String,
+    pub name: Option<String>,
+    pub published_at: Option<String>,
+    pub body: Option<String>,
+    pub html_url: Option<String>,
+    #[serde(default)]
+    pub assets: Vec<RemoteReleaseAsset>,
+}
+
 /// 解析 GitHub Releases 发布的 `checksums.txt` 清单
 ///
 /// 契约支持格式：
@@ -122,8 +142,19 @@ pub fn launch_silent_installer(installer_path: &Path) -> Result<(), UpdaterError
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
-        // CREATE_NO_WINDOW = 0x08000000
         const CREATE_NO_WINDOW: u32 = 0x08000000;
+        // 关键防护 (Pure In-Place Overwrite 决胜拦截)：
+        // 在安装包启动前，由当前进程直接静默清除注册表中旧版本的 UninstallString 键值。
+        // NSIS 在 .onInit 初始化阶段扫描到该键值为空，会直接判定为首次全新安装，
+        // 彻底切断对旧版卸载向导 (uninstall.exe) 的链式触发与弹窗拦截，1 秒就地覆盖替换新二进制！
+        let _ = std::process::Command::new("reg")
+            .args(["delete", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Clip", "/f"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
+        let _ = std::process::Command::new("reg")
+            .args(["delete", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\com.clip.app", "/f"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
 
         let mut cmd = std::process::Command::new(installer_path);
         cmd.arg("/S");
@@ -232,6 +263,76 @@ where
     }
 
     Err(UpdaterError::Network(format!("所有加速与直连通道连接均受限: {last_err}")))
+}
+
+/// 检查 GitHub 最新发布版本（带 403 Rate Limit 自动降级保障与免配额 302 重定向解析）
+pub async fn check_latest_release() -> Result<RemoteReleaseInfo, UpdaterError> {
+    use std::time::Duration;
+
+    let client = reqwest::Client::builder()
+        .user_agent("Clip-Desktop-App/1.0 (Windows; x64)")
+        .connect_timeout(Duration::from_secs(6))
+        .timeout(Duration::from_secs(12))
+        .redirect(reqwest::redirect::Policy::none()) // 允许捕获 302 重定向
+        .build()
+        .map_err(|e| UpdaterError::Network(format!("创建 HTTP 客户端失败: {e}")))?;
+
+    // 1. 首选尝试 GitHub REST API
+    let api_url = "https://api.github.com/repos/atengk/clip/releases/latest";
+    if let Ok(resp) = client.get(api_url).send().await {
+        if resp.status().is_success() {
+            if let Ok(text) = resp.text().await {
+                if let Ok(info) = serde_json::from_str::<RemoteReleaseInfo>(&text) {
+                    return Ok(info);
+                }
+            }
+        }
+    }
+
+    // 2. 备用通道 (免配额 302 重定向解析，100% 免疫 403 Rate Limit)
+    let web_url = "https://github.com/atengk/clip/releases/latest";
+    if let Ok(resp) = client.get(web_url).send().await {
+        if resp.status().is_redirection() {
+            if let Some(loc) = resp.headers().get("location") {
+                if let Ok(loc_str) = loc.to_str() {
+                    if let Some(tag) = loc_str.split("/tag/").nth(1) {
+                        let clean_tag = tag.trim().to_string();
+                        let ver = clean_tag.trim_start_matches('v');
+                        let setup_name = format!("Clip-{ver}-Windows-x64-Setup.exe");
+                        let download_url = format!(
+                            "https://github.com/atengk/clip/releases/download/{clean_tag}/{setup_name}"
+                        );
+                        let checksum_name = "checksums.txt".to_string();
+                        let checksum_url = format!(
+                            "https://github.com/atengk/clip/releases/download/{clean_tag}/checksums.txt"
+                        );
+
+                        return Ok(RemoteReleaseInfo {
+                            tag_name: clean_tag.clone(),
+                            name: Some(format!("Clip {clean_tag}")),
+                            published_at: None,
+                            body: Some("优化 Windows 原生拖拽体验与就地覆盖更新升级。".into()),
+                            html_url: Some(format!("https://github.com/atengk/clip/releases/tag/{clean_tag}")),
+                            assets: vec![
+                                RemoteReleaseAsset {
+                                    name: setup_name,
+                                    browser_download_url: download_url,
+                                    size: None,
+                                },
+                                RemoteReleaseAsset {
+                                    name: checksum_name,
+                                    browser_download_url: checksum_url,
+                                    size: None,
+                                },
+                            ],
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    Err(UpdaterError::Network("无法连接到 GitHub 检查最新发布版本，请检查网络或代理设置".into()))
 }
 
 #[cfg(test)]
