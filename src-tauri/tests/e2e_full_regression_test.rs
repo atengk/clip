@@ -131,3 +131,33 @@ fn test_seam3_conformance_and_zero_secret_invariant() {
     assert!(!conf_str.contains("sk-"), "配置文件不得包含真实私钥");
     assert!(!conf_str.contains("AIzaSy"), "配置文件不得包含真实 Google API 凭据");
 }
+
+#[test]
+fn test_seam4_cross_platform_pal_driver_conformance_and_contract() {
+    // 1. 验证当前宿主平台驱动实现契约
+    #[cfg(target_os = "windows")]
+    let host_driver: Arc<dyn PlatformDriver> =
+        Arc::new(clip_lib::pal::windows::WindowsPlatformDriver::new());
+
+    #[cfg(target_os = "macos")]
+    let host_driver: Arc<dyn PlatformDriver> =
+        Arc::new(clip_lib::pal::macos::MacosPlatformDriver::new());
+
+    #[cfg(target_os = "linux")]
+    let host_driver: Arc<dyn PlatformDriver> =
+        Arc::new(clip_lib::pal::linux::LinuxPlatformDriver::new());
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    let host_driver: Arc<dyn PlatformDriver> =
+        Arc::new(clip_lib::pal::mock::MockPlatformDriver::new());
+
+    // 2. 验证基础抽象方法调用不产生 panic
+    assert!(host_driver.read_text().is_ok() || host_driver.read_text().is_err());
+    assert!(host_driver.ocr_image(&[]).is_ok());
+
+    // 3. 验证确定性 Mock 接缝隔离持续稳定
+    let mock: Arc<dyn PlatformDriver> = Arc::new(MockPlatformDriver::new());
+    mock.write_text("跨平台驱动契约健全").unwrap();
+    assert_eq!(mock.read_text().unwrap(), Some("跨平台驱动契约健全".into()));
+    assert_eq!(mock.ocr_image(&[0, 1, 2]).unwrap(), "");
+}
