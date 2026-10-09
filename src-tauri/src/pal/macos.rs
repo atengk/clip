@@ -224,9 +224,21 @@ impl PlatformDriver for MacosPlatformDriver {
         thread::spawn(move || {
             let pasteboard = unsafe { NSPasteboard::generalPasteboard() };
             let mut last_change_count = unsafe { pasteboard.changeCount() };
+            let mut last_tick = std::time::Instant::now();
 
             while is_monitoring.load(Ordering::Relaxed) {
                 thread::sleep(interval);
+
+                // 能耗保护：检测系统挂起/休眠唤醒（时间跨度远大于轮询周期表示刚从休眠中唤醒）
+                let now = std::time::Instant::now();
+                let elapsed = now.duration_since(last_tick);
+                last_tick = now;
+
+                if elapsed > interval * 4 {
+                    // 系统刚从休眠中恢复，重置并同步最新 change_count，避免能耗浪费与抖动
+                    last_change_count = unsafe { pasteboard.changeCount() };
+                    continue;
+                }
 
                 let current_change_count = unsafe { pasteboard.changeCount() };
                 if current_change_count != last_change_count {
@@ -295,7 +307,14 @@ impl PlatformDriver for MacosPlatformDriver {
             }
 
             // 2. 初始化 VNImageRequestHandler
-            let options: *mut AnyObject = objc2::msg_send![AnyClass::get("NSDictionary").unwrap(), dictionary];
+            let dict_cls = match AnyClass::get("NSDictionary") {
+                Some(cls) => cls,
+                None => {
+                    let () = objc2::msg_send![request, release];
+                    return Ok(String::new());
+                }
+            };
+            let options: *mut AnyObject = objc2::msg_send![dict_cls, dictionary];
             let handler: *mut AnyObject = objc2::msg_send![handler_class, alloc];
             let handler: *mut AnyObject = objc2::msg_send![handler, initWithData: &*ns_data, options: options];
             if handler.is_null() {
@@ -304,7 +323,15 @@ impl PlatformDriver for MacosPlatformDriver {
             }
 
             // 3. 执行文字识别请求
-            let requests = NSArray::from_vec(vec![Retained::retain(request).unwrap()]);
+            let retained_req = match Retained::retain(request) {
+                Some(r) => r,
+                None => {
+                    let () = objc2::msg_send![handler, release];
+                    let () = objc2::msg_send![request, release];
+                    return Ok(String::new());
+                }
+            };
+            let requests = NSArray::from_vec(vec![retained_req]);
             let mut error: *mut AnyObject = std::ptr::null_mut();
             let success: bool = objc2::msg_send![handler, performRequests: &*requests, error: &mut error];
 

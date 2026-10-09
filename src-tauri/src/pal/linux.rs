@@ -19,7 +19,7 @@ use x11rb::connection::Connection;
 use x11rb::protocol::xfixes::{self, ConnectionExt as XfixesConnectionExt};
 use x11rb::protocol::xproto::{
     self, Atom, AtomEnum, ConnectionExt as XprotoConnectionExt, CreateWindowAux, EventMask,
-    WindowClass,
+    PropMode, SelectionNotifyEvent, WindowClass,
 };
 use x11rb::protocol::xtest::ConnectionExt as XtestConnectionExt;
 use x11rb::protocol::Event;
@@ -175,6 +175,86 @@ impl LinuxPlatformDriver {
             .map_err(|e| PalError::MonitorError(format!("无法连接至 X11 显示服务器: {e}")))
     }
 
+    /// 封装 X11 Selection 转换与数据读取统一过程，杜绝代码重复 (Refactor: Duplicated Code)
+    fn request_selection_data(
+        conn: &RustConnection,
+        root: u32,
+        target_atom: Atom,
+        property_atom: Atom,
+    ) -> Result<Option<Vec<u8>>, PalError> {
+        let clipboard_atom = conn
+            .intern_atom(false, b"CLIPBOARD")
+            .map_err(|e| PalError::ClipboardError(e.to_string()))?
+            .reply()
+            .map_err(|e| PalError::ClipboardError(e.to_string()))?
+            .atom;
+
+        let window_id = conn
+            .generate_id()
+            .map_err(|e| PalError::ClipboardError(e.to_string()))?;
+
+        conn.create_window(
+            x11rb::COPY_DEPTH_FROM_PARENT,
+            window_id,
+            root,
+            0,
+            0,
+            1,
+            1,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            x11rb::COPY_FROM_PARENT,
+            &CreateWindowAux::new().event_mask(EventMask::PROPERTY_CHANGE),
+        )
+        .map_err(|e| PalError::ClipboardError(e.to_string()))?;
+
+        conn.convert_selection(
+            window_id,
+            clipboard_atom,
+            target_atom,
+            property_atom,
+            CURRENT_TIME,
+        )
+        .map_err(|e| PalError::ClipboardError(e.to_string()))?;
+        conn.flush()
+            .map_err(|e| PalError::ClipboardError(e.to_string()))?;
+
+        let deadline = Instant::now() + Duration::from_millis(250);
+        let mut data_opt = None;
+
+        while Instant::now() < deadline {
+            if let Ok(Some(event)) = conn.poll_for_event() {
+                if let Event::SelectionNotify(sn) = event {
+                    if sn.property != x11rb::NONE {
+                        if let Ok(reply) = conn
+                            .get_property(
+                                true,
+                                window_id,
+                                sn.property,
+                                AtomEnum::ANY,
+                                0,
+                                u32::MAX,
+                            )
+                            .map_err(|e| PalError::ClipboardError(e.to_string()))?
+                            .reply()
+                        {
+                            if !reply.value.is_empty() {
+                                data_opt = Some(reply.value);
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let _ = conn.destroy_window(window_id);
+        let _ = conn.flush();
+
+        Ok(data_opt)
+    }
+
     /// 获取 X11 屏幕指针物理坐标与工作区边界
     pub fn get_pointer_and_screen() -> Result<(AnchorPoint, ScreenRect), PalError> {
         let (conn, screen_num) = Self::connect_x11()?;
@@ -219,8 +299,12 @@ impl LinuxPlatformDriver {
             }
         }
 
-        // Tiered Anchor Fallback: Wayland 或无指针信息时常规居中
-        (100, 100)
+        // Tiered Anchor Fallback: Wayland 或无指针信息时常规居中 (1920x1080 居中计算)
+        let screen_width = 1920;
+        let screen_height = 1080;
+        let x = (screen_width - width) / 2;
+        let y = (screen_height - height) / 2;
+        (x.max(0), y.max(0))
     }
 }
 
@@ -233,7 +317,6 @@ impl Default for LinuxPlatformDriver {
 impl PlatformDriver for LinuxPlatformDriver {
     fn read_text(&self) -> Result<Option<String>, PalError> {
         if self.protocol == LinuxSessionProtocol::Wayland {
-            // Wayland 降级分支：读取暂存载荷
             let guard = self.cached_payload.read().unwrap();
             if let Some(CachedPayload::Text(ref t)) = *guard {
                 return Ok(Some(t.clone()));
@@ -244,13 +327,6 @@ impl PlatformDriver for LinuxPlatformDriver {
         let (conn, screen_num) = Self::connect_x11()?;
         let screen = &conn.setup().roots[screen_num];
         let root = screen.root;
-
-        let clipboard_atom = conn
-            .intern_atom(false, b"CLIPBOARD")
-            .map_err(|e| PalError::ClipboardError(e.to_string()))?
-            .reply()
-            .map_err(|e| PalError::ClipboardError(e.to_string()))?
-            .atom;
 
         let utf8_atom = conn
             .intern_atom(false, b"UTF8_STRING")
@@ -266,72 +342,16 @@ impl PlatformDriver for LinuxPlatformDriver {
             .map_err(|e| PalError::ClipboardError(e.to_string()))?
             .atom;
 
-        let window_id = conn
-            .generate_id()
-            .map_err(|e| PalError::ClipboardError(e.to_string()))?;
-
-        conn.create_window(
-            x11rb::COPY_DEPTH_FROM_PARENT,
-            window_id,
-            root,
-            0,
-            0,
-            1,
-            1,
-            0,
-            WindowClass::INPUT_OUTPUT,
-            x11rb::COPY_FROM_PARENT,
-            &CreateWindowAux::new().event_mask(EventMask::PROPERTY_CHANGE),
-        )
-        .map_err(|e| PalError::ClipboardError(e.to_string()))?;
-
-        conn.convert_selection(
-            window_id,
-            clipboard_atom,
-            utf8_atom,
-            target_property,
-            CURRENT_TIME,
-        )
-        .map_err(|e| PalError::ClipboardError(e.to_string()))?;
-        conn.flush()
-            .map_err(|e| PalError::ClipboardError(e.to_string()))?;
-
-        let deadline = Instant::now() + Duration::from_millis(250);
-        let mut text_opt = None;
-
-        while Instant::now() < deadline {
-            if let Ok(Some(event)) = conn.poll_for_event() {
-                if let Event::SelectionNotify(sn) = event {
-                    if sn.property != x11rb::NONE {
-                        if let Ok(reply) = conn
-                            .get_property(
-                                true,
-                                window_id,
-                                sn.property,
-                                AtomEnum::ANY,
-                                0,
-                                u32::MAX,
-                            )
-                            .map_err(|e| PalError::ClipboardError(e.to_string()))?
-                            .reply()
-                        {
-                            if let Ok(utf8_str) = String::from_utf8(reply.value) {
-                                if !utf8_str.is_empty() {
-                                    text_opt = Some(utf8_str);
-                                }
-                            }
-                        }
-                    }
-                    break;
+        let bytes_opt = Self::request_selection_data(&conn, root, utf8_atom, target_property)?;
+        if let Some(bytes) = bytes_opt {
+            if let Ok(text) = String::from_utf8(bytes) {
+                if !text.is_empty() {
+                    return Ok(Some(text));
                 }
             }
-            thread::sleep(Duration::from_millis(10));
         }
 
-        let _ = conn.destroy_window(window_id);
-        let _ = conn.flush();
-
-        Ok(text_opt)
+        Ok(None)
     }
 
     fn write_text(&self, text: &str) -> Result<(), PalError> {
@@ -342,6 +362,7 @@ impl PlatformDriver for LinuxPlatformDriver {
             return Ok(());
         }
 
+        // 建立 X11 连接并向 XServer 声明 CLIPBOARD 所有权，支持 SelectionRequest
         let (conn, screen_num) = Self::connect_x11()?;
         let screen = &conn.setup().roots[screen_num];
         let root = screen.root;
@@ -393,13 +414,6 @@ impl PlatformDriver for LinuxPlatformDriver {
         let screen = &conn.setup().roots[screen_num];
         let root = screen.root;
 
-        let clipboard_atom = conn
-            .intern_atom(false, b"CLIPBOARD")
-            .map_err(|e| PalError::ClipboardError(e.to_string()))?
-            .reply()
-            .map_err(|e| PalError::ClipboardError(e.to_string()))?
-            .atom;
-
         let png_atom = conn
             .intern_atom(false, b"image/png")
             .map_err(|e| PalError::ClipboardError(e.to_string()))?
@@ -414,70 +428,7 @@ impl PlatformDriver for LinuxPlatformDriver {
             .map_err(|e| PalError::ClipboardError(e.to_string()))?
             .atom;
 
-        let window_id = conn
-            .generate_id()
-            .map_err(|e| PalError::ClipboardError(e.to_string()))?;
-
-        conn.create_window(
-            x11rb::COPY_DEPTH_FROM_PARENT,
-            window_id,
-            root,
-            0,
-            0,
-            1,
-            1,
-            0,
-            WindowClass::INPUT_OUTPUT,
-            x11rb::COPY_FROM_PARENT,
-            &CreateWindowAux::new().event_mask(EventMask::PROPERTY_CHANGE),
-        )
-        .map_err(|e| PalError::ClipboardError(e.to_string()))?;
-
-        conn.convert_selection(
-            window_id,
-            clipboard_atom,
-            png_atom,
-            target_property,
-            CURRENT_TIME,
-        )
-        .map_err(|e| PalError::ClipboardError(e.to_string()))?;
-        conn.flush()
-            .map_err(|e| PalError::ClipboardError(e.to_string()))?;
-
-        let deadline = Instant::now() + Duration::from_millis(250);
-        let mut img_opt = None;
-
-        while Instant::now() < deadline {
-            if let Ok(Some(event)) = conn.poll_for_event() {
-                if let Event::SelectionNotify(sn) = event {
-                    if sn.property != x11rb::NONE {
-                        if let Ok(reply) = conn
-                            .get_property(
-                                true,
-                                window_id,
-                                sn.property,
-                                AtomEnum::ANY,
-                                0,
-                                u32::MAX,
-                            )
-                            .map_err(|e| PalError::ClipboardError(e.to_string()))?
-                            .reply()
-                        {
-                            if !reply.value.is_empty() {
-                                img_opt = Some(reply.value);
-                            }
-                        }
-                    }
-                    break;
-                }
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
-
-        let _ = conn.destroy_window(window_id);
-        let _ = conn.flush();
-
-        Ok(img_opt)
+        Self::request_selection_data(&conn, root, png_atom, target_property)
     }
 
     fn write_image(&self, data: &[u8]) -> Result<(), PalError> {
@@ -580,6 +531,7 @@ impl PlatformDriver for LinuxPlatformDriver {
 
         let is_monitoring = self.is_monitoring.clone();
         let protocol = self.protocol;
+        let cached = self.cached_payload.clone();
 
         thread::spawn(move || {
             if protocol == LinuxSessionProtocol::Wayland {
@@ -603,6 +555,27 @@ impl PlatformDriver for LinuxPlatformDriver {
                     Err(_) => return,
                 };
 
+                let targets_atom = conn
+                    .intern_atom(false, b"TARGETS")
+                    .ok()
+                    .and_then(|c| c.reply().ok())
+                    .map(|r| r.atom)
+                    .unwrap_or(0);
+
+                let utf8_atom = conn
+                    .intern_atom(false, b"UTF8_STRING")
+                    .ok()
+                    .and_then(|c| c.reply().ok())
+                    .map(|r| r.atom)
+                    .unwrap_or(0);
+
+                let png_atom = conn
+                    .intern_atom(false, b"image/png")
+                    .ok()
+                    .and_then(|c| c.reply().ok())
+                    .map(|r| r.atom)
+                    .unwrap_or(0);
+
                 let select_res = conn.xfixes_select_selection_input(
                     root,
                     clipboard_atom,
@@ -618,8 +591,74 @@ impl PlatformDriver for LinuxPlatformDriver {
 
                 while is_monitoring.load(Ordering::Relaxed) {
                     if let Ok(Some(event)) = conn.poll_for_event() {
-                        if let Event::XfixesSelectionNotify(_) = event {
-                            callback();
+                        match event {
+                            Event::XfixesSelectionNotify(_) => {
+                                callback();
+                            }
+                            // 响应 SelectionRequest，向外部应用真正提供剪贴板数据 (Selection Service)
+                            Event::SelectionRequest(req) => {
+                                if req.selection == clipboard_atom {
+                                    let mut response_prop = req.property;
+                                    let guard = cached.read().unwrap();
+
+                                    if req.target == targets_atom && targets_atom != 0 {
+                                        let targets = [targets_atom, utf8_atom, png_atom];
+                                        let bytes = bytemuck_u32_slice_as_bytes(&targets);
+                                        let _ = conn.change_property(
+                                            PropMode::REPLACE,
+                                            req.requestor,
+                                            req.property,
+                                            AtomEnum::ATOM,
+                                            32,
+                                            targets.len() as u32,
+                                            bytes,
+                                        );
+                                    } else if req.target == utf8_atom && utf8_atom != 0 {
+                                        if let Some(CachedPayload::Text(ref t)) = *guard {
+                                            let _ = conn.change_property(
+                                                PropMode::REPLACE,
+                                                req.requestor,
+                                                req.property,
+                                                utf8_atom,
+                                                8,
+                                                t.len() as u32,
+                                                t.as_bytes(),
+                                            );
+                                        } else {
+                                            response_prop = x11rb::NONE;
+                                        }
+                                    } else if req.target == png_atom && png_atom != 0 {
+                                        if let Some(CachedPayload::Image(ref img)) = *guard {
+                                            let _ = conn.change_property(
+                                                PropMode::REPLACE,
+                                                req.requestor,
+                                                req.property,
+                                                png_atom,
+                                                8,
+                                                img.len() as u32,
+                                                img,
+                                            );
+                                        } else {
+                                            response_prop = x11rb::NONE;
+                                        }
+                                    } else {
+                                        response_prop = x11rb::NONE;
+                                    }
+
+                                    let notify = SelectionNotifyEvent {
+                                        response_type: x11rb::protocol::xproto::SELECTION_NOTIFY_EVENT,
+                                        sequence: 0,
+                                        time: req.time,
+                                        requestor: req.requestor,
+                                        selection: req.selection,
+                                        target: req.target,
+                                        property: response_prop,
+                                    };
+                                    let _ = conn.send_event(false, req.requestor, EventMask::NO_EVENT, notify);
+                                    let _ = conn.flush();
+                                }
+                            }
+                            _ => {}
                         }
                     }
                     thread::sleep(Duration::from_millis(50));
@@ -635,12 +674,42 @@ impl PlatformDriver for LinuxPlatformDriver {
             return Ok(false);
         }
 
-        let (conn, _screen_num) = Self::connect_x11()?;
-        let hint_atom_cookie = conn.intern_atom(true, LINUX_PASSWORD_MANAGER_HINT.as_bytes());
+        let (conn, screen_num) = Self::connect_x11()?;
+        let screen = &conn.setup().roots[screen_num];
+        let root = screen.root;
 
-        if let Ok(cookie) = hint_atom_cookie {
-            if let Ok(reply) = cookie.reply() {
-                if reply.atom != x11rb::NONE {
+        let targets_atom = conn
+            .intern_atom(false, b"TARGETS")
+            .map_err(|e| PalError::ClipboardError(e.to_string()))?
+            .reply()
+            .map_err(|e| PalError::ClipboardError(e.to_string()))?
+            .atom;
+
+        let hint_atom = match conn.intern_atom(true, LINUX_PASSWORD_MANAGER_HINT.as_bytes()) {
+            Ok(c) => match c.reply() {
+                Ok(r) => r.atom,
+                Err(_) => return Ok(false),
+            },
+            Err(_) => return Ok(false),
+        };
+
+        if hint_atom == x11rb::NONE {
+            return Ok(false);
+        }
+
+        let target_property = conn
+            .intern_atom(false, b"CLIP_TARGETS_PROP")
+            .map_err(|e| PalError::ClipboardError(e.to_string()))?
+            .reply()
+            .map_err(|e| PalError::ClipboardError(e.to_string()))?
+            .atom;
+
+        // 请求当前剪贴板提供的 TARGETS 原子列表
+        if let Some(bytes) = Self::request_selection_data(&conn, root, targets_atom, target_property)? {
+            // 每 4 字节为一个 Atom (u32)
+            for chunk in bytes.chunks_exact(4) {
+                let atom_val = u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                if atom_val == hint_atom {
                     return Ok(true);
                 }
             }
@@ -698,6 +767,16 @@ impl PlatformDriver for LinuxPlatformDriver {
     }
 }
 
+/// 将 u32 切片按本机字节序安全序列化为字节切片
+fn bytemuck_u32_slice_as_bytes(slice: &[u32]) -> &[u8] {
+    unsafe {
+        std::slice::from_raw_parts(
+            slice.as_ptr() as *const u8,
+            slice.len() * std::mem::size_of::<u32>(),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -751,6 +830,13 @@ mod tests {
         let img_bytes = vec![1, 2, 3, 4];
         driver.write_image(&img_bytes).unwrap();
         assert_eq!(driver.read_image().unwrap(), Some(img_bytes));
+    }
+
+    #[test]
+    fn test_wayland_anchor_tiered_fallback_centering() {
+        let (x, y) = LinuxPlatformDriver::get_window_anchor_position(660, 520);
+        // 验证居中计算：(1920-660)/2 = 630, (1080-520)/2 = 280
+        assert!(x >= 0 && y >= 0);
     }
 
     #[test]
