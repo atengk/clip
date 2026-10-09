@@ -130,6 +130,9 @@ fn test_tauri_conf_nsis_spec() {
     assert!(zh_content.contains("deleteAppData"), "中文必须配置 deleteAppData 提示默认安全保留");
     assert!(zh_content.contains("uninstPageTopText"), "中文必须配置 uninstPageTopText");
     assert!(zh_content.contains("appRunningOkKill"), "中文必须配置 appRunningOkKill 避免卸载期空白弹窗");
+    assert!(zh_content.contains("upgradeHeaderTitle"), "中文必须配置 upgradeHeaderTitle");
+    assert!(zh_content.contains("upgradeSafetyNotice"), "中文必须配置 upgradeSafetyNotice 安全保障承诺");
+    assert!(zh_content.contains("upgradeActionPrompt"), "中文必须配置 upgradeActionPrompt 平滑升级选项");
 
     assert!(en_content.contains("launchClipNow"), "英文语言包必须包含 launchClipNow");
     assert!(en_content.contains("finishPageDescription"), "英文语言包必须包含 finishPageDescription");
@@ -139,6 +142,9 @@ fn test_tauri_conf_nsis_spec() {
     assert!(en_content.contains("deleteAppData"), "英文必须配置 deleteAppData 提示默认安全保留");
     assert!(en_content.contains("uninstPageTopText"), "英文必须配置 uninstPageTopText");
     assert!(en_content.contains("appRunningOkKill"), "英文必须配置 appRunningOkKill 避免卸载期空白弹窗");
+    assert!(en_content.contains("upgradeHeaderTitle"), "英文必须配置 upgradeHeaderTitle");
+    assert!(en_content.contains("upgradeSafetyNotice"), "英文必须配置 upgradeSafetyNotice 安全保障承诺");
+    assert!(en_content.contains("upgradeActionPrompt"), "英文必须配置 upgradeActionPrompt 平滑升级选项");
 }
 
 #[test]

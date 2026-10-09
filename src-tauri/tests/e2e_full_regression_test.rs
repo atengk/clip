@@ -130,6 +130,43 @@ fn test_seam3_conformance_and_zero_secret_invariant() {
     // 3. 验证仓库无明文私钥或违规敏感信息
     assert!(!conf_str.contains("sk-"), "配置文件不得包含真实私钥");
     assert!(!conf_str.contains("AIzaSy"), "配置文件不得包含真实 Google API 凭据");
+
+    // 4. 验证版本号单一真相源 (SSOT 门禁，杜绝版本硬编码漂移)
+    let tauri_conf: serde_json::Value =
+        serde_json::from_str(&conf_str).expect("tauri.conf.json 格式有效");
+    let tauri_version = tauri_conf["version"].as_str().expect("必须有 version 字段");
+
+    let cargo_toml_str = fs::read_to_string("Cargo.toml").expect("读取 Cargo.toml 失败");
+    assert!(
+        cargo_toml_str.contains(&format!("version = \"{}\"", tauri_version)),
+        "Cargo.toml 版本必须与 tauri.conf.json 严格一致 ({})",
+        tauri_version
+    );
+
+    let pkg_json_path = Path::new("../package.json");
+    if pkg_json_path.exists() {
+        let pkg_str = fs::read_to_string(pkg_json_path).expect("读取 package.json 失败");
+        let pkg_json: serde_json::Value = serde_json::from_str(&pkg_str).unwrap();
+        assert_eq!(
+            pkg_json["version"].as_str(),
+            Some(tauri_version),
+            "package.json 版本必须与 tauri.conf.json 严格一致"
+        );
+    }
+
+    let app_tsx_path = Path::new("../src/App.tsx");
+    if app_tsx_path.exists() {
+        let app_tsx = fs::read_to_string(app_tsx_path).expect("读取 App.tsx 失败");
+        assert!(
+            app_tsx.contains(&format!("CURRENT_VERSION = \"v{}\"", tauri_version)),
+            "App.tsx 默认备用版本号必须同步为 v{}",
+            tauri_version
+        );
+        assert!(
+            app_tsx.contains("getVersion()"),
+            "App.tsx 必须动态调用 getVersion() 单一真实来源"
+        );
+    }
 }
 
 #[test]

@@ -213,12 +213,18 @@ Function PageReinstall
   nsis_tauri_utils::SemverCompare "${VERSION}" $R0
   Pop $R0
   ; Reinstalling the same version or Upgrading:
-  ; Clip 原生就地直接覆盖策略 (Pure In-Place Overwrite) - 彻底跳过重新安装/卸载询问页，直接覆盖更新
+  ; Clip 原生平滑就地覆盖与升级感知向导 (Smooth In-Place Upgrade)
   ${If} $R0 = 0
-    Abort
+    StrCpy $R1 "$(upgradeDetected)"
+    StrCpy $R2 "$(upgradeActionPrompt)"
+    StrCpy $R3 "$(upgradeActionFresh)"
+    !insertmacro MUI_HEADER_TEXT "$(upgradeHeaderTitle)" "$(upgradeHeaderSubtitle)"
   ; Upgrading
   ${ElseIf} $R0 = 1
-    Abort
+    StrCpy $R1 "$(upgradeDetected)"
+    StrCpy $R2 "$(upgradeActionPrompt)"
+    StrCpy $R3 "$(upgradeActionFresh)"
+    !insertmacro MUI_HEADER_TEXT "$(upgradeHeaderTitle)" "$(upgradeHeaderSubtitle)"
   ; Downgrading
   ${ElseIf} $R0 = -1
     StrCpy $R1 "$(newerVersionInstalled)"
@@ -246,14 +252,20 @@ Function PageReinstall
     Pop $R4
     ${IfThen} $(^RTL) = 1 ${|} nsDialogs::SetRTL $(^RTL) ${|}
 
-    ${NSD_CreateLabel} 0 0 100% 24u $R1
+    ${NSD_CreateLabel} 0 0 100% 28u $R1
     Pop $R1
 
-    ${NSD_CreateRadioButton} 30u 50u -30u 8u $R2
+    ${NSD_CreateRadioButton} 20u 32u -20u 12u $R2
     Pop $R2
     ${NSD_OnClick} $R2 PageReinstallUpdateSelection
 
-    ${NSD_CreateRadioButton} 30u 70u -30u 8u $R3
+    ; 如果是平滑升级或同版本覆盖，展示醒目的安全保证文案
+    ${If} $R0 >= 0
+      ${NSD_CreateLabel} 32u 46u -32u 26u "$(upgradeSafetyNotice)"
+      Pop $R5
+    ${EndIf}
+
+    ${NSD_CreateRadioButton} 20u 76u -20u 12u $R3
     Pop $R3
     ; Disable this radio button if downgrading and downgrades are disabled
     !if "${ALLOWDOWNGRADES}" == "false"
@@ -300,16 +312,16 @@ Function PageLeaveReinstall
   ;   1 => first choice was selected
   ;   0 => second choice was selected
   ${If} $R0 = 0 ; Same version, proceed
-    ${If} $R1 = 1              ; User chose to add/reinstall
+    ${If} $R1 = 1              ; User chose in-place smooth reinstall
       Goto reinst_done
-    ${Else}                    ; User chose to uninstall
+    ${Else}                    ; User chose to fresh uninstall
       Goto reinst_uninstall
     ${EndIf}
   ${ElseIf} $R0 = 1 ; Upgrading
-    ${If} $R1 = 1              ; User chose to uninstall
+    ${If} $R1 = 1              ; User chose in-place smooth upgrade (Recommended)
+      Goto reinst_done
+    ${Else}                    ; User chose to fresh reinstall
       Goto reinst_uninstall
-    ${Else}
-      Goto reinst_done         ; User chose NOT to uninstall
     ${EndIf}
   ${ElseIf} $R0 = -1 ; Downgrading
     ${If} $R1 = 1              ; User chose to uninstall

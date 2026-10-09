@@ -10,6 +10,7 @@ import React, { useEffect, useState, useCallback, useRef, useMemo } from "react"
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { maskSensitiveContent } from "./utils/privacy";
 import { compareSemVer, formatBytes } from "./utils/version";
@@ -18,9 +19,9 @@ import { ReleaseNotesView } from "./components/ReleaseNotesView";
 import "./App.css";
 
 /**
- * 当前客户端编译版本号 (SemVer)
+ * 客户端默认备用版本号 (SemVer)
  */
-export const CURRENT_VERSION = "v1.2.10";
+export const CURRENT_VERSION = "v1.3.0";
 
 /**
  * 存储状态与磁盘占用摘要信息契约 (遵循 Issue #19)
@@ -469,11 +470,40 @@ const MainPanel: React.FC = () => {
   const [downloadError, setDownloadError] = useState<string | null>(null);
   const downloadAbortRef = useRef<AbortController | null>(null);
 
+  // 客户端运行时版本号 (SSOT 单一真相源，默认由 Tauri 动态注入)
+  const [currentVersion, setCurrentVersion] = useState<string>(CURRENT_VERSION);
+
+  // 动态获取 Tauri 宿主版本号并进行平滑升级感知检测
+  useEffect(() => {
+    (async () => {
+      try {
+        const rawVer = await getVersion();
+        const formattedVer = rawVer.startsWith("v") ? rawVer : `v${rawVer}`;
+        setCurrentVersion(formattedVer);
+
+        // 检测版本跃迁并给出升级定心丸提示
+        const lastSeen = localStorage.getItem("clip_last_seen_version");
+        if (lastSeen && lastSeen !== formattedVer) {
+          if (compareSemVer(lastSeen, formattedVer) > 0) {
+            setUndoToast({
+              text: `🎉 Clip 已成功平滑升级至 ${formattedVer}，剪贴板历史与设置已完好就绪`,
+              showUndo: false,
+            });
+            setTimeout(() => setUndoToast(null), 5000);
+          }
+        }
+        localStorage.setItem("clip_last_seen_version", formattedVer);
+      } catch (e) {
+        console.warn("无法从 Tauri 获取运行时版本号:", e);
+      }
+    })();
+  }, []);
+
   // 是否存在可用新版本 (Update Beacon)
   const hasNewVersion = useMemo(() => {
     if (!updateInfo) return false;
-    return compareSemVer(CURRENT_VERSION, updateInfo.tag_name) > 0;
-  }, [updateInfo]);
+    return compareSemVer(currentVersion, updateInfo.tag_name) > 0;
+  }, [updateInfo, currentVersion]);
 
   // 待提交物理删除与 3 秒撤销网 (Entry Deletion & Safety Net)
   const [pendingDelete, setPendingDelete] = useState<{ items: DisplayItem[]; timerId: ReturnType<typeof setTimeout> } | null>(null);
@@ -1032,7 +1062,7 @@ const MainPanel: React.FC = () => {
     setUpdateFeedback(null);
     try {
       const data = await invoke<GitHubReleaseInfo>("check_for_updates");
-      const hasNew = compareSemVer(CURRENT_VERSION, data.tag_name) > 0;
+      const hasNew = compareSemVer(currentVersion, data.tag_name) > 0;
       if (hasNew) {
         setUpdateInfo(data);
         setDownloadingUpdate(false);
@@ -1044,7 +1074,7 @@ const MainPanel: React.FC = () => {
         if (isManual) {
           setUpdateFeedback({
             type: "success",
-            text: `当前已是最新版本 (${CURRENT_VERSION})`,
+            text: `当前已是最新版本 (${currentVersion})`,
           });
         }
       }
@@ -1058,7 +1088,7 @@ const MainPanel: React.FC = () => {
     } finally {
       setUpdateChecking(false);
     }
-  }, []);
+  }, [currentVersion]);
 
   /**
    * 取消当前进行中的更新下载 (Issue #20)
@@ -3106,7 +3136,7 @@ const MainPanel: React.FC = () => {
                 <div className="settings-row">
                   <div className="settings-label-group">
                     <span className="settings-label">
-                      Clip 剪贴板管理器 <span className="version-pill">{CURRENT_VERSION}</span>
+                      Clip 剪贴板管理器 <span className="version-pill">{currentVersion}</span>
                     </span>
                     <span className="settings-desc">极轻量、跨平台桌面剪贴板历史管理器 (Tauri v2 + React + Rust)</span>
                   </div>

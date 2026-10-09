@@ -42,3 +42,11 @@ LangString dirPageDestText ${LANG_ENGLISH} "Destination Folder (Current User - N
 LangString uninstPageTopText ${LANG_ENGLISH} "Setup will uninstall ${PRODUCTNAME} from your computer."
 LangString uninstPageLocationText ${LANG_ENGLISH} "Uninstalling from:"
 LangString deleteAppData ${LANG_ENGLISH} "Also remove clipboard history and custom snippets (Preserved by default)"
+
+; 5. Smooth Upgrade Wizard Messages
+LangString upgradeHeaderTitle ${LANG_ENGLISH} "Ready to Upgrade"
+LangString upgradeHeaderSubtitle ${LANG_ENGLISH} "Existing version detected, your personal data is safely preserved"
+LangString upgradeDetected ${LANG_ENGLISH} "Setup detected an existing installation of ${PRODUCTNAME}. Upgrading smoothly to v${VERSION}."
+LangString upgradeSafetyNotice ${LANG_ENGLISH} "🛡️ Safe Upgrade Guarantee: Your clipboard history, pinned items, snippets, and preferences will be preserved intact."
+LangString upgradeActionPrompt ${LANG_ENGLISH} "Perform in-place smooth upgrade (Recommended, preserves all data)"
+LangString upgradeActionFresh ${LANG_ENGLISH} "Reinstall all components"

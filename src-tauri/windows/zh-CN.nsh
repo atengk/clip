@@ -42,3 +42,11 @@ LangString dirPageDestText ${LANG_SIMPCHINESE} "目标文件夹 (当前用户免
 LangString uninstPageTopText ${LANG_SIMPCHINESE} "安装向导即将从计算机中卸载 ${PRODUCTNAME}。"
 LangString uninstPageLocationText ${LANG_SIMPCHINESE} "卸载目录："
 LangString deleteAppData ${LANG_SIMPCHINESE} "同时清除本地剪贴板历史与自定义短语 (默认保留)"
+
+; 5. 平滑升级感知向导文案
+LangString upgradeHeaderTitle ${LANG_SIMPCHINESE} "平滑升级就绪"
+LangString upgradeHeaderSubtitle ${LANG_SIMPCHINESE} "检测到现有版本，您的历史数据与设置将被 100% 完好保留"
+LangString upgradeDetected ${LANG_SIMPCHINESE} "安装程序检测到您的计算机中已安装 ${PRODUCTNAME}。即将平滑升级至 v${VERSION}。"
+LangString upgradeSafetyNotice ${LANG_SIMPCHINESE} "🛡️ 升级保护承诺：您的所有剪贴板历史记录、收藏置顶、自定义短语及个人偏好设置均将完整安全保留，无需手动备份。"
+LangString upgradeActionPrompt ${LANG_SIMPCHINESE} "执行就地平滑覆盖升级 (推荐，保留全部个人数据)"
+LangString upgradeActionFresh ${LANG_SIMPCHINESE} "完全重新安装组件"

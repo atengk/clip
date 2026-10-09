@@ -17,11 +17,14 @@
 
 ; 4. 安装生命周期宏 (Process Self-Healing & In-place Upgrade)
 !macro NSIS_HOOK_PREINSTALL
-  DetailPrint "正在检测并退出正在运行的 Clip 进程以解除文件锁定..."
-  ; 1. 进程自愈：终止运行中的 Clip.exe 避免 Windows 独占写入锁定
+  DetailPrint "正在准备安全就地升级环境，保护用户剪贴板数据与历史记录..."
+  ; 1. 温和退出尝试：先发送正常关闭消息给 Clip.exe
+  nsExec::Exec 'taskkill /IM Clip.exe'
+  Sleep 600
+
+  ; 2. 进程自愈超时保障：若仍未退出则强制终止避免 Windows 独占写入锁定
   nsExec::Exec 'taskkill /F /IM Clip.exe'
-  ; 2. 安全缓冲等待 500ms 确保文件句柄彻底释放
-  Sleep 500
+  Sleep 400
 
   ; 3. 纯覆盖就地升级模式 (Pure In-Place Overwrite Mode):
   ; 临时移除旧版本的 UninstallString 键值，彻底屏蔽安装器对旧版卸载向导 (Uninstall.exe) 的链式调用
