@@ -21,7 +21,7 @@ import "./App.css";
 /**
  * 客户端默认备用版本号 (SemVer)
  */
-export const CURRENT_VERSION = "v1.3.0";
+export const CURRENT_VERSION = "v1.3.1";
 
 /**
  * 存储状态与磁盘占用摘要信息契约 (遵循 Issue #19)
