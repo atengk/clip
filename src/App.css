@@ -98,37 +98,14 @@ kbd {
   border-bottom: 1px solid var(--panel-border);
   background: #ffffff;
   flex-shrink: 0;
-  -webkit-app-region: drag;
+  -webkit-app-region: no-drag;
 }
 
-/* 顶部精致极简拖拽把手条 (Drag Handle Pill - 原生 -webkit-app-region 驱动) */
-.drag-handle-pill-container {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 100%;
-  height: 13px;
+/* 仅在窗口处于固定常驻状态时，允许按住顶部/底部空白区拖拽移动窗口 */
+.panel-container.is-pinned .panel-header-compact,
+.panel-container.is-pinned .panel-footer-bar {
+  -webkit-app-region: drag;
   cursor: move;
-  user-select: none;
-  -webkit-user-select: none;
-  background: transparent;
-  -webkit-app-region: drag;
-}
-
-.drag-handle-pill {
-  width: 40px;
-  height: 4px;
-  background-color: rgba(148, 163, 184, 0.5);
-  border-radius: 9999px;
-  transition: all 0.18s cubic-bezier(0.4, 0, 0.2, 1);
-  pointer-events: none;
-}
-
-.drag-handle-pill-container:hover .drag-handle-pill {
-  width: 56px;
-  height: 5px;
-  background-color: rgba(99, 102, 241, 0.9);
-  box-shadow: 0 0 8px rgba(99, 102, 241, 0.5);
 }
 
 /* 交互控件强制免疫拖拽 (no-drag) */
@@ -139,7 +116,7 @@ button,
 input,
 select,
 textarea,
-.item-checkbox {
+.item-leading-slot {
   -webkit-app-region: no-drag;
 }
 
@@ -483,70 +460,89 @@ textarea,
   overflow: hidden;
 }
 
-/* 1. 数字键帽 (20×20) */
-.item-keycap {
+/* 1. 前置单槽位：平时显示数字键帽，悬停或多选模式平滑置换为复选框 (Hover-Swap) */
+.item-leading-slot {
   width: 20px;
   height: 20px;
   border-radius: 5px;
   background: #ffffff;
   border: 1px solid #e2e8f0;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  font-weight: 700;
-  color: var(--brand-primary);
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  cursor: pointer;
+  position: relative;
+  transition: all 0.12s ease;
+  user-select: none;
 }
 
-.item-keycap.dot {
+.item-leading-slot .slot-num {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--brand-primary);
+  line-height: 1;
+}
+
+.item-leading-slot.dot .slot-num {
   color: var(--text-sub);
   font-weight: 400;
   font-size: 14px;
+}
+
+.item-leading-slot.dot {
   border-color: transparent;
   background: transparent;
   box-shadow: none;
 }
 
-/* 多选复选框 (悬浮或已选时显现，点击直接勾选参与批量操作) */
-.item-checkbox {
-  width: 16px;
-  height: 16px;
-  border-radius: 4px;
-  border: 1px solid #cbd5e1;
-  background: #ffffff;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+.item-leading-slot .slot-check {
+  display: none;
   font-size: 11px;
   font-weight: 700;
-  color: #ffffff;
-  cursor: pointer;
-  flex-shrink: 0;
-  transition: all 0.12s ease;
-  opacity: 0;
-  pointer-events: none;
+  line-height: 1;
+  color: #64748b;
 }
 
-.panel-item:hover .item-checkbox,
-.item-checkbox.checked,
-.item-checkbox.in-multi-mode {
-  opacity: 1;
-  pointer-events: auto;
+/* 悬停 (Hover) 或 多选模式 (in-multi-mode) 时切换为待选复选框形态 */
+.panel-item:hover .item-leading-slot,
+.item-leading-slot.in-multi-mode {
+  border: 1px solid #cbd5e1;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
 }
 
-.item-checkbox:hover {
+.panel-item:hover .item-leading-slot:hover {
   border-color: var(--brand-primary);
   background: #f8fafc;
 }
 
-.item-checkbox.checked {
-  background: var(--brand-primary);
-  border-color: var(--brand-primary);
-  opacity: 1;
-  pointer-events: auto;
+.panel-item:hover .item-leading-slot .slot-num,
+.item-leading-slot.in-multi-mode .slot-num {
+  display: none;
+}
+
+.panel-item:hover .item-leading-slot .slot-check,
+.item-leading-slot.in-multi-mode .slot-check {
+  display: flex;
+}
+
+/* 勾选状态 (checked) */
+.item-leading-slot.checked {
+  background: var(--brand-primary) !important;
+  border-color: var(--brand-primary) !important;
+  box-shadow: 0 1px 3px rgba(99, 102, 241, 0.3) !important;
+}
+
+.item-leading-slot.checked .slot-num {
+  display: none !important;
+}
+
+.item-leading-slot.checked .slot-check {
+  display: flex !important;
+  color: #ffffff !important;
 }
 
 /* 2. 绝对固定 28×28 类型/缩略图槽位 */
@@ -1123,7 +1119,7 @@ textarea,
   font-size: 11px;
   color: var(--text-muted);
   flex-shrink: 0;
-  -webkit-app-region: drag;
+  -webkit-app-region: no-drag;
 }
 
 .panel-footer-bar button,

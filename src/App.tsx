@@ -20,7 +20,7 @@ import "./App.css";
 /**
  * 当前客户端编译版本号 (SemVer)
  */
-export const CURRENT_VERSION = "v1.2.9";
+export const CURRENT_VERSION = "v1.2.10";
 
 /**
  * 存储状态与磁盘占用摘要信息契约 (遵循 Issue #19)
@@ -738,9 +738,10 @@ const MainPanel: React.FC = () => {
   }, [selectedIndex, displayItems]);
 
   /**
-   * 按住空白区域平滑拖动无边框窗口 (Window Dragging)
+   * 按住空白区域平滑拖动无边框窗口 (仅在固定状态生效，非固定状态不触发任何拖拽)
    */
   const handleStartDrag = useCallback((e: React.MouseEvent) => {
+    if (!isPinnedRef.current) return;
     if (e.button === 0) {
       const target = e.target as HTMLElement;
       if (
@@ -1127,8 +1128,7 @@ const MainPanel: React.FC = () => {
         setDownloadProgress((prev) => ({ ...prev, statusText: "正在读取校验清单..." }));
         const checkCandidates = [
           checksumsAsset.browser_download_url,
-          `https://ghproxy.cn/${checksumsAsset.browser_download_url}`,
-          `https://mirror.ghproxy.com/${checksumsAsset.browser_download_url}`,
+          `https://gh-proxy.com/${checksumsAsset.browser_download_url}`,
           `https://ghproxy.net/${checksumsAsset.browser_download_url}`,
         ];
         for (const checkUrl of checkCandidates) {
@@ -1942,16 +1942,11 @@ const MainPanel: React.FC = () => {
   const selectedItem = displayItems[selectedIndex];
 
   return (
-    <div className="panel-container">
+    <div className={`panel-container ${isPinned ? "is-pinned" : ""}`}>
       {/* ========================================================================= */}
       {/* 二层紧凑高信息密度头部 (Two-Layer Compact Header - 高度 ≤ 82px)               */}
       {/* ========================================================================= */}
-      <header className="panel-header-compact" onMouseDown={handleStartDrag} data-tauri-drag-region>
-        {/* 顶部中央精致极简拖拽把手 (Drag Handle Pill - 明确窗口位移心理暗示) */}
-        <div className="drag-handle-pill-container" onMouseDown={handleStartDrag} data-tauri-drag-region>
-          <div className="drag-handle-pill" title="按住拖拽移动悬浮窗口" data-tauri-drag-region />
-        </div>
-
+      <header className="panel-header-compact" onMouseDown={handleStartDrag}>
         {/* Row 1: 整合搜索栏、模式切换胶囊与工具入口 (44px) */}
         <div className="header-row-1">
           <div className="search-wrapper" data-tauri-drag-region="false">
@@ -2207,27 +2202,27 @@ const MainPanel: React.FC = () => {
                   onMouseEnter={() => setSelectedIndex(index)}
                 >
                   <div className="item-leading">
-                    {/* 1. 数字键帽 (20×20) */}
-                    {fastPasteIndex ? (
-                      <span className="item-keycap" title={`快捷直贴: 直接按 ${fastPasteIndex} 或 Ctrl+${fastPasteIndex}`}>
-                        {fastPasteIndex}
-                      </span>
-                    ) : (
-                      <span className="item-keycap dot">•</span>
-                    )}
-
-                    {/* 多选复选框 (悬浮或已选时显现，点击直接勾选参与批量操作) */}
+                    {/* 1. 前置单槽位：平时显示数字键帽，悬停或多选时平滑原地置换为复选框 (Hover-Swap) */}
                     <div
-                      className={`item-checkbox ${isItemMultiSelected ? "checked" : ""} ${
-                        selectedIds.length > 0 ? "in-multi-mode" : ""
-                      }`}
+                      className={`item-leading-slot ${fastPasteIndex ? "" : "dot"} ${
+                        isItemMultiSelected ? "checked" : ""
+                      } ${selectedIds.length > 0 ? "in-multi-mode" : ""}`}
                       onClick={(e) => {
                         e.stopPropagation();
                         handleToggleSelectItem(item.id, e);
                       }}
-                      title="勾选此项参与多选批量操作"
+                      title={
+                        isItemMultiSelected
+                          ? "取消勾选此项"
+                          : selectedIds.length > 0
+                          ? "勾选此项参与批量操作"
+                          : fastPasteIndex
+                          ? `快捷直贴: 直接按 ${fastPasteIndex} 或 Ctrl+${fastPasteIndex} (点击可勾选多选)`
+                          : "点击勾选此项参与多选"
+                      }
                     >
-                      {isItemMultiSelected ? "✓" : ""}
+                      <span className="slot-num">{fastPasteIndex || "•"}</span>
+                      <span className="slot-check">{isItemMultiSelected ? "✓" : ""}</span>
                     </div>
 
                     {/* 2. 绝对固定 28×28 槽位 */}
@@ -2564,7 +2559,7 @@ const MainPanel: React.FC = () => {
       {/* ========================================================================= */}
       {/* 底部状态栏 (Bottom Status Bar - 34px)                                       */}
       {/* ========================================================================= */}
-      <footer className="panel-footer-bar" onMouseDown={handleStartDrag} data-tauri-drag-region>
+      <footer className="panel-footer-bar" onMouseDown={handleStartDrag}>
         <div className="footer-left">
           <span className="status-dot" />
           <span style={{ fontWeight: 500 }}>

@@ -129,9 +129,8 @@ pub async fn download_and_install_update(
     // 构建候选端点：官方直链优先（自动走系统代理），备用国内加速节点
     let mut endpoints: Vec<(String, String)> = Vec::new();
     endpoints.push(("GitHub 节点 (代理优先)".into(), url.clone()));
-    endpoints.push(("加速镜像通道 A (ghproxy.cn)".into(), format!("https://ghproxy.cn/{}", url)));
-    endpoints.push(("加速镜像通道 B (mirror.ghproxy.com)".into(), format!("https://mirror.ghproxy.com/{}", url)));
-    endpoints.push(("加速镜像通道 C (ghproxy.net)".into(), format!("https://ghproxy.net/{}", url)));
+    endpoints.push(("加速镜像通道 A (gh-proxy.com)".into(), format!("https://gh-proxy.com/{}", url)));
+    endpoints.push(("加速镜像通道 B (ghproxy.net)".into(), format!("https://ghproxy.net/{}", url)));
 
     let app_handle_clone = app_handle.clone();
     let hit_endpoint = download_with_fallback(&endpoints, &target_path, move |received, total, endpoint_name| {

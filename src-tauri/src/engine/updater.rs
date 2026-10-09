@@ -205,12 +205,20 @@ where
 
         let response = match client.get(url).send().await {
             Ok(resp) => {
-                if resp.status().is_success() {
-                    resp
-                } else {
+                if !resp.status().is_success() {
                     last_err = format!("通道 {name} 返回 HTTP 状态码: {}", resp.status());
                     continue;
                 }
+                // 检查 Content-Type 防御网页劫持（如失效镜像返回 HTML 广告或停靠页）
+                if let Some(ct) = resp.headers().get(reqwest::header::CONTENT_TYPE) {
+                    if let Ok(ct_str) = ct.to_str() {
+                        if ct_str.contains("text/html") {
+                            last_err = format!("通道 {name} 返回异常网页内容 (Content-Type: {ct_str})");
+                            continue;
+                        }
+                    }
+                }
+                resp
             }
             Err(e) => {
                 last_err = format!("通道 {name} 连接异常: {e}");
@@ -255,6 +263,13 @@ where
 
         if total_bytes > 0 && received < total_bytes {
             last_err = format!("通道 {name} 数据接收不完整: {received}/{total_bytes}");
+            let _ = std::fs::remove_file(target_path);
+            continue;
+        }
+
+        // 校验文件体积下限（安装包不应小于 1MB，防止空文件或小型劫持网页响应）
+        if received < 1024 * 1024 {
+            last_err = format!("通道 {name} 下载内容异常过小 ({received} bytes)，疑似被劫持");
             let _ = std::fs::remove_file(target_path);
             continue;
         }
