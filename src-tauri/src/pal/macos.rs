@@ -109,10 +109,7 @@ impl MacosPlatformDriver {
             let width = CGDisplayPixelsWide(main_display) as i32;
             let height = CGDisplayPixelsHigh(main_display) as i32;
 
-            let anchor = AnchorPoint::Point {
-                x: loc.x as i32,
-                y: loc.y as i32,
-            };
+            let anchor = AnchorPoint::new(loc.x as i32, loc.y as i32);
 
             let screen_rect = ScreenRect {
                 left: 0,
@@ -128,7 +125,7 @@ impl MacosPlatformDriver {
     /// 计算主面板在 macOS 屏幕上的四向翻转贴靠坐标
     pub fn get_window_anchor_position(width: i32, height: i32) -> (i32, i32) {
         if let Ok((anchor, screen_rect)) = Self::get_pointer_and_screen() {
-            calculate_flip_fit_position(&anchor, width, height, &screen_rect, DEFAULT_ANCHOR_MARGIN)
+            calculate_flip_fit_position(anchor, width, height, screen_rect, DEFAULT_ANCHOR_MARGIN)
         } else {
             // 降级回退至屏幕常规坐标
             (100, 100)
@@ -164,7 +161,7 @@ impl PlatformDriver for MacosPlatformDriver {
     fn read_image(&self) -> Result<Option<Vec<u8>>, PalError> {
         let pasteboard = unsafe { NSPasteboard::generalPasteboard() };
         let ns_data_opt = unsafe { pasteboard.dataForType(NSPasteboardTypePNG) };
-        Ok(ns_data_opt.map(|data| data.as_bytes().to_vec()))
+        Ok(ns_data_opt.map(|data| data.bytes().to_vec()))
     }
 
     fn write_image(&self, data: &[u8]) -> Result<(), PalError> {
@@ -256,7 +253,12 @@ impl PlatformDriver for MacosPlatformDriver {
         let types_opt: Option<Retained<NSArray<_>>> = unsafe { pasteboard.types() };
 
         if let Some(types) = types_opt {
-            let type_names: Vec<String> = types.iter().map(|t| t.to_string()).collect();
+            let count = types.count();
+            let mut type_names = Vec::with_capacity(count);
+            for i in 0..count {
+                let item = types.objectAtIndex(i);
+                type_names.push(item.to_string());
+            }
             return Ok(Self::matches_ignored_type(&type_names));
         }
 

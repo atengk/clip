@@ -687,6 +687,7 @@ pub fn select_backup_save_path(default_name: Option<String>) -> Result<Option<St
     }
     #[cfg(not(windows))]
     {
+        let _ = default_name;
         Ok(None)
     }
 }

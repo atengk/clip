@@ -267,10 +267,7 @@ impl LinuxPlatformDriver {
             .reply()
             .map_err(|e| PalError::InternalError(format!("等待 X11 指针位置响应失败: {e}")))?;
 
-        let anchor = AnchorPoint::Point {
-            x: reply.root_x as i32,
-            y: reply.root_y as i32,
-        };
+        let anchor = AnchorPoint::new(reply.root_x as i32, reply.root_y as i32);
 
         let screen_rect = ScreenRect {
             left: 0,
@@ -290,10 +287,10 @@ impl LinuxPlatformDriver {
         if Self::detect_session_protocol() == LinuxSessionProtocol::X11 {
             if let Ok((anchor, screen_rect)) = Self::get_pointer_and_screen() {
                 return calculate_flip_fit_position(
-                    &anchor,
+                    anchor,
                     width,
                     height,
-                    &screen_rect,
+                    screen_rect,
                     DEFAULT_ANCHOR_MARGIN,
                 );
             }
