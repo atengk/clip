@@ -49,4 +49,8 @@ features = [
     "Storage_Streams",
 ]
 
-
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5"
+objc2-foundation = { version = "0.2", features = ["NSString", "NSData", "NSArray"] }
+objc2-app-kit = { version = "0.2", features = ["NSPasteboard", "NSWorkspace", "NSRunningApplication"] }
+core-graphics = "0.23"

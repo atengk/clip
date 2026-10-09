@@ -7,6 +7,8 @@ pub mod anchor;
 pub mod mock;
 #[cfg(windows)]
 pub mod windows;
+#[cfg(target_os = "macos")]
+pub mod macos;
 
 use std::sync::Arc;
 use thiserror::Error;
