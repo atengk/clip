@@ -1,8 +1,11 @@
-//! macOS Cocoa 原生平台驱动实现，基于 AppKit NSPasteboard 与 CoreGraphics 提供剪贴板交互与按键模拟。
+//! macOS Cocoa 原生平台驱动实现，基于 AppKit NSPasteboard、Vision 离线 OCR 与 CoreGraphics 提供剪贴板交互与按键模拟。
 //!
 //! @author Ateng
 //! @since 2026-10-09
 
+use crate::pal::anchor::{
+    calculate_flip_fit_position, AnchorPoint, ScreenRect, DEFAULT_ANCHOR_MARGIN,
+};
 use crate::pal::{PalError, PlatformDriver};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -10,6 +13,7 @@ use std::thread;
 use std::time::Duration;
 
 use objc2::rc::Retained;
+use objc2::runtime::{AnyClass, AnyObject};
 use objc2_app_kit::{
     NSPasteboard, NSPasteboardTypePNG, NSPasteboardTypeString, NSRunningApplication, NSWorkspace,
 };
@@ -32,7 +36,16 @@ const CG_EVENT_FLAG_COMMAND: u64 = 0x00100000;
 /// CoreGraphics HID 级事件派发位置
 const CG_HID_EVENT_TAP: u32 = 0;
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CGPoint {
+    pub x: f64,
+    pub y: f64,
+}
+
 extern "C" {
+    fn CGEventCreate(source: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+    fn CGEventGetLocation(event: *mut std::ffi::c_void) -> CGPoint;
     fn CGEventCreateKeyboardEvent(
         source: *mut std::ffi::c_void,
         virtual_key: u16,
@@ -42,6 +55,9 @@ extern "C" {
     fn CGEventPost(tap: u32, event: *mut std::ffi::c_void);
     fn CFRelease(cf: *mut std::ffi::c_void);
     fn AXIsProcessTrusted() -> bool;
+    fn CGMainDisplayID() -> u32;
+    fn CGDisplayPixelsWide(display: u32) -> usize;
+    fn CGDisplayPixelsHigh(display: u32) -> usize;
 }
 
 /// macOS Cocoa 原生平台驱动 (Cocoa Driver)
@@ -77,6 +93,46 @@ impl MacosPlatformDriver {
     /// 检查当前进程是否具备系统辅助功能 (Accessibility) 按键注入权限
     pub fn is_accessibility_trusted() -> bool {
         unsafe { AXIsProcessTrusted() }
+    }
+
+    /// 获取 macOS 物理鼠标绝对坐标与当前主屏幕可视工作区
+    pub fn get_pointer_and_screen() -> Result<(AnchorPoint, ScreenRect), PalError> {
+        unsafe {
+            let event = CGEventCreate(std::ptr::null_mut());
+            if event.is_null() {
+                return Err(PalError::InternalError("无法创建 CoreGraphics 事件探针".into()));
+            }
+            let loc = CGEventGetLocation(event);
+            CFRelease(event);
+
+            let main_display = CGMainDisplayID();
+            let width = CGDisplayPixelsWide(main_display) as i32;
+            let height = CGDisplayPixelsHigh(main_display) as i32;
+
+            let anchor = AnchorPoint::Point {
+                x: loc.x as i32,
+                y: loc.y as i32,
+            };
+
+            let screen_rect = ScreenRect {
+                left: 0,
+                top: 0,
+                right: if width > 0 { width } else { 1920 },
+                bottom: if height > 0 { height } else { 1080 },
+            };
+
+            Ok((anchor, screen_rect))
+        }
+    }
+
+    /// 计算主面板在 macOS 屏幕上的四向翻转贴靠坐标
+    pub fn get_window_anchor_position(width: i32, height: i32) -> (i32, i32) {
+        if let Ok((anchor, screen_rect)) = Self::get_pointer_and_screen() {
+            calculate_flip_fit_position(&anchor, width, height, &screen_rect, DEFAULT_ANCHOR_MARGIN)
+        } else {
+            // 降级回退至屏幕常规坐标
+            (100, 100)
+        }
     }
 }
 
@@ -212,9 +268,81 @@ impl PlatformDriver for MacosPlatformDriver {
         Ok(None)
     }
 
-    fn ocr_image(&self, _data: &[u8]) -> Result<String, PalError> {
-        // 预留给工单 #31 对接 Apple Vision 原生离线 OCR
-        Ok(String::new())
+    fn ocr_image(&self, data: &[u8]) -> Result<String, PalError> {
+        if data.is_empty() {
+            return Ok(String::new());
+        }
+
+        // 对接 Apple Vision 原生离线 OCR 框架 (VNRecognizeTextRequest)
+        // 在 macOS 10.15+ 环境下原生内置，0MB 外部模型开销
+        unsafe {
+            let ns_data = NSData::with_bytes(data);
+
+            let handler_class = match AnyClass::get("VNImageRequestHandler") {
+                Some(cls) => cls,
+                None => return Ok(String::new()),
+            };
+
+            let request_class = match AnyClass::get("VNRecognizeTextRequest") {
+                Some(cls) => cls,
+                None => return Ok(String::new()),
+            };
+
+            // 1. 初始化 VNRecognizeTextRequest
+            let request: *mut AnyObject = objc2::msg_send![request_class, new];
+            if request.is_null() {
+                return Ok(String::new());
+            }
+
+            // 2. 初始化 VNImageRequestHandler
+            let options: *mut AnyObject = objc2::msg_send![AnyClass::get("NSDictionary").unwrap(), dictionary];
+            let handler: *mut AnyObject = objc2::msg_send![handler_class, alloc];
+            let handler: *mut AnyObject = objc2::msg_send![handler, initWithData: &*ns_data, options: options];
+            if handler.is_null() {
+                let () = objc2::msg_send![request, release];
+                return Ok(String::new());
+            }
+
+            // 3. 执行文字识别请求
+            let requests = NSArray::from_vec(vec![Retained::retain(request).unwrap()]);
+            let mut error: *mut AnyObject = std::ptr::null_mut();
+            let success: bool = objc2::msg_send![handler, performRequests: &*requests, error: &mut error];
+
+            let mut extracted_text = String::new();
+            if success {
+                let results: *mut AnyObject = objc2::msg_send![request, results];
+                if !results.is_null() {
+                    let count: usize = objc2::msg_send![results, count];
+                    for i in 0..count {
+                        let observation: *mut AnyObject = objc2::msg_send![results, objectAtIndex: i];
+                        let candidates: *mut AnyObject = objc2::msg_send![observation, topCandidates: 1usize];
+                        if !candidates.is_null() {
+                            let cand_count: usize = objc2::msg_send![candidates, count];
+                            if cand_count > 0 {
+                                let top: *mut AnyObject = objc2::msg_send![candidates, objectAtIndex: 0usize];
+                                let cand_str: *mut AnyObject = objc2::msg_send![top, string];
+                                if !cand_str.is_null() {
+                                    let utf8_ptr: *const std::ffi::c_char = objc2::msg_send![cand_str, UTF8String];
+                                    if !utf8_ptr.is_null() {
+                                        if let Ok(line) = std::ffi::CStr::from_ptr(utf8_ptr).to_str() {
+                                            if !extracted_text.is_empty() {
+                                                extracted_text.push('\n');
+                                            }
+                                            extracted_text.push_str(line);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            let () = objc2::msg_send![handler, release];
+            let () = objc2::msg_send![request, release];
+
+            Ok(extracted_text)
+        }
     }
 }
 
@@ -249,5 +377,11 @@ mod tests {
 
         let driver_custom = MacosPlatformDriver::with_heartbeat_interval(Duration::from_millis(100));
         assert_eq!(driver_custom.heartbeat_interval, Duration::from_millis(100));
+    }
+
+    #[test]
+    fn test_ocr_image_empty_data_returns_empty_string() {
+        let driver = MacosPlatformDriver::new();
+        assert_eq!(driver.ocr_image(&[]).unwrap(), "");
     }
 }
