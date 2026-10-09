@@ -256,7 +256,7 @@ impl PlatformDriver for MacosPlatformDriver {
             let count = types.count();
             let mut type_names = Vec::with_capacity(count);
             for i in 0..count {
-                let item = types.objectAtIndex(i);
+                let item = unsafe { types.objectAtIndex(i) };
                 type_names.push(item.to_string());
             }
             return Ok(Self::matches_ignored_type(&type_names));
