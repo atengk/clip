@@ -215,3 +215,27 @@ _Avoid_: 单开检测, 防多开脚本, 重复运行拦截
 **Silent Subsystem**:
 杜绝应用在启动、注册表存取或调用辅助脚本时产生任何控制台黑框（`conhost.exe`）的静默守护架构，优先使用内核原生 API 代替命令行调用，并对必要子进程强行注入 `CREATE_NO_WINDOW` 标记。
 _Avoid_: 静默执行, 无控制台, 黑屏消除
+
+**Cocoa Driver**:
+基于 Apple Cocoa / AppKit 体系的 macOS 原生平台驱动实现，依托 `NSPasteboard`、`CGEvent` 模拟注入及 `VNRecognizeTextRequest` 原生离线 OCR，实现 0MB 额外体积与极低能耗监听。
+_Avoid_: Mac 适配器, 苹果插件, macOS 脚本
+
+**Dual-Stack Linux Driver**:
+面向 Linux 桌面环境的 X11 与 Wayland 双协议自适应平台驱动架构。在 X11 下通过纯 Rust `x11rb`（XFixes + XTest）实现零提权原生监听与回填；在 Wayland 环境下自适应协议并实现安全沙箱降级防御。
+_Avoid_: Linux 兼容层, X11 驱动, Wayland 适配器
+
+**Accessibility Fallback**:
+macOS 下当系统辅助功能（Accessibility）授权缺失时，自动放弃底层按键注入并降级为“静默注入系统剪贴板 + 弹出引导授权提示”的容错防御策略，杜绝因权限拦截导致的未响应与崩溃。
+_Avoid_: 权限报错, 粘贴失败提示, 授权弹窗
+
+**Heartbeat Poller**:
+macOS 平台上基于 `NSPasteboard.changeCount` 的 250ms 轻量自适应心跳轮询监听机制，与系统睡眠/唤醒通知联动，在保证即时捕获的同时实现极低电池与 CPU 开销。
+_Avoid_: 定时器轮询, 剪贴板轮询器, 刷状态脚本
+
+**CLI OCR Fallback**:
+Linux 环境下因缺乏系统级 OCR 运行时，基于宿主环境动态探测 `tesseract` 命令行工具并在存在时委托执行图像文字提取的轻量降级服务，保持发行包零体积膨胀。
+_Avoid_: Tesseract 插件, Linux OCR 模块, 外部文字识别
+
+**Tiered Anchor Fallback**:
+针对多平台显示服务器能力差异的窗口阶梯式贴靠定位策略：在支持物理光标感知的环境（Windows 输入光标/鼠标、macOS 鼠标指针、Linux X11 指针）采用 `Flip-fit Anchor` 紧密吸附；在受严格沙箱限制的现代 Wayland 环境下，优雅回退至当前活动显示器可视工作区居中呈现，杜绝越界与定位黑屏。
+_Avoid_: 强制居中, 光标报错, 坐标探测失败

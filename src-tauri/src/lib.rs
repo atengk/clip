@@ -195,11 +195,20 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
-            // 1. 初始化平台驱动 (Windows 原生驱动，非 Windows 平台降级为 Mock 驱动以保障 CI 跨平台编译)
-            #[cfg(windows)]
+            // 1. 初始化平台驱动 (根据目标操作系统装配 Windows/macOS/Linux 原生驱动，其他环境降级为 Mock 驱动)
+            #[cfg(target_os = "windows")]
             let driver: Arc<dyn PlatformDriver> =
                 Arc::new(crate::pal::windows::WindowsPlatformDriver::new());
-            #[cfg(not(windows))]
+
+            #[cfg(target_os = "macos")]
+            let driver: Arc<dyn PlatformDriver> =
+                Arc::new(crate::pal::macos::MacosPlatformDriver::new());
+
+            #[cfg(target_os = "linux")]
+            let driver: Arc<dyn PlatformDriver> =
+                Arc::new(crate::pal::linux::LinuxPlatformDriver::new());
+
+            #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
             let driver: Arc<dyn PlatformDriver> =
                 Arc::new(crate::pal::mock::MockPlatformDriver::new());
 
@@ -440,18 +449,31 @@ pub fn toggle_main_window(app_handle: &tauri::AppHandle) {
             if is_visible {
                 crate::commands::clipboard::safe_hide_main_window(app_handle);
             } else {
-                #[cfg(windows)]
+                #[cfg(target_os = "windows")]
                 crate::pal::windows::WindowsPlatformDriver::capture_foreground_window();
 
                 const WIN_WIDTH: i32 = crate::pal::anchor::FULL_WINDOW_WIDTH;
                 const WIN_HEIGHT: i32 = crate::pal::anchor::FULL_WINDOW_HEIGHT;
 
-                #[cfg(windows)]
+                #[cfg(target_os = "windows")]
                 let (x, y) = crate::pal::windows::WindowsPlatformDriver::get_window_anchor_position(
                     WIN_WIDTH,
                     WIN_HEIGHT,
                 );
-                #[cfg(not(windows))]
+
+                #[cfg(target_os = "macos")]
+                let (x, y) = crate::pal::macos::MacosPlatformDriver::get_window_anchor_position(
+                    WIN_WIDTH,
+                    WIN_HEIGHT,
+                );
+
+                #[cfg(target_os = "linux")]
+                let (x, y) = crate::pal::linux::LinuxPlatformDriver::get_window_anchor_position(
+                    WIN_WIDTH,
+                    WIN_HEIGHT,
+                );
+
+                #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
                 let (x, y) = {
                     if let Ok(Some(monitor)) = window.current_monitor() {
                         let monitor_size = monitor.size();
